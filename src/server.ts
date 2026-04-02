@@ -2805,6 +2805,53 @@ app.post('/api/user/withdraw-password', async (req, res) => {
       [passwordHash, parsedUserId]
     )
 
+    await pool.query(
+      `
+      CREATE TABLE IF NOT EXISTS logs (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id BIGINT UNSIGNED NULL,
+        entity_type VARCHAR(60) NOT NULL,
+        entity_id BIGINT UNSIGNED NULL,
+        action VARCHAR(100) NOT NULL,
+        old_balance DECIMAL(12,2) NULL,
+        new_balance DECIMAL(12,2) NULL,
+        amount DECIMAL(12,2) NULL,
+        metadata JSON NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_logs_user_id (user_id),
+        KEY idx_logs_entity_type (entity_type),
+        KEY idx_logs_entity_id (entity_id),
+        KEY idx_logs_action (action),
+        KEY idx_logs_created_at (created_at)
+      )
+      `
+    )
+
+    await pool.query(
+      `
+      INSERT INTO logs
+      (
+        user_id,
+        entity_type,
+        entity_id,
+        action,
+        metadata
+      )
+      VALUES (?, ?, ?, ?, ?)
+      `,
+      [
+        parsedUserId,
+        'user',
+        parsedUserId,
+        'withdraw_password_changed',
+        JSON.stringify({
+          source: 'user_withdraw_password',
+          changedAt: new Date().toISOString(),
+        }),
+      ]
+    )
+
     res.json({
       ok: true,
       message: 'Senha de saque salva com sucesso.',
