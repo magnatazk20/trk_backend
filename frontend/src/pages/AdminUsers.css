@@ -1,0 +1,95 @@
+.admin-users-page .admin-header {
+  margin-bottom: 14px;
+}
+
+.admin-users-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.admin-users-panel {
+  padding: 12px;
+}
+
+.admin-users-table-wrap {
+  overflow-x: auto;
+}
+
+.admin-users-table td,
+.admin-users-table th {
+  vertical-align: middle;
+}
+
+.admin-users-input {
+  width: 100%;
+  min-width: 140px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.admin-users-input:focus {
+  border-color: #3b82f6;
+}
+
+.admin-users-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-users-actions button {
+  border: 1px solid #38528b;
+  background: #1d2b4c;
+  color: #e8efff;
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.admin-users-actions button:hover {
+  background: #24365f;
+}
+
+.admin-users-actions .warn {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(127, 29, 29, 0.35);
+  color: #fecaca;
+}
+
+.admin-users-actions .warn:hover {
+  background: rgba(127, 29, 29, 0.48);
+}
+
+.admin-users-actions .soft {
+  border-color: rgba(148, 163, 184, 0.35);
+  background: rgba(30, 41, 59, 0.45);
+  color: #cbd5e1;
+}
+
+@media (max-width: 860px) {
+  .admin-users-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-users-panel {
+    padding: 10px;
+  }
+
+  .admin-users-table th,
+  .admin-users-table td {
+    font-size: 0.82rem;
+    padding: 8px;
+  }
+
+  .admin-users-actions button {
+    font-size: 0.78rem;
+    padding: 5px 8px;
+  }
+}

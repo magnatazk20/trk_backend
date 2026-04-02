@@ -1,0 +1,362 @@
+.tax-page {
+  padding-bottom: 110px;
+  min-height: 100vh;
+  overflow-y: auto;
+}
+
+.tax-card {
+  margin: 18px 20px 0;
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: 0 16px 30px rgba(2, 6, 23, 0.35);
+  backdrop-filter: blur(10px);
+  overflow: visible;
+}
+
+.tax-form {
+  padding: 24px;
+  color: #e2e8f0;
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
+.tax-form h2 {
+  margin: 6px 0 8px;
+  font-size: 1.2rem;
+  line-height: 1.3;
+  color: #f8fafc;
+  letter-spacing: 0.2px;
+}
+
+.tax-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.tax-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.tax-grid input {
+  height: 42px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.75);
+  color: #f8fafc;
+  padding: 0 12px;
+  outline: none;
+  font-size: 0.92rem;
+}
+
+.tax-grid input:focus {
+  border-color: rgba(56, 189, 248, 0.8);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+}
+
+.tax-grid input:disabled {
+  opacity: 0.7;
+}
+
+.tax-summary {
+  margin-top: 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(2, 6, 23, 0.35);
+  padding: 14px;
+}
+
+.tax-summary h3 {
+  margin: 0 0 10px;
+  color: #f8fafc;
+}
+
+.tax-summary p {
+  display: flex;
+  justify-content: space-between;
+  margin: 7px 0;
+  font-size: 0.92rem;
+}
+
+.tax-actions {
+  margin-top: 0;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tax-submit-btn {
+  border: none;
+  border-radius: 12px;
+  height: 42px;
+  padding: 0 18px;
+  background: linear-gradient(90deg, #0ea5e9, #22d3ee);
+  color: #04131f;
+  font-weight: 700;
+  cursor: pointer;
+  min-width: 170px;
+}
+
+.tax-feedback {
+  margin-top: 12px;
+  color: #22c55e;
+  font-weight: 600;
+}
+
+.tax-report-card {
+  margin-top: 14px;
+}
+
+.tax-report-subtitle {
+  margin: 0 0 16px;
+  color: #94a3b8;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.tax-controls {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 14px;
+  padding: 14px;
+  background: rgba(2, 6, 23, 0.35);
+  display: grid;
+  gap: 12px;
+}
+
+.tax-report-actions {
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.tax-outline-btn {
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  border-radius: 12px;
+  height: 42px;
+  padding: 0 18px;
+  background: rgba(15, 23, 42, 0.4);
+  color: #7dd3fc;
+  font-weight: 700;
+  cursor: pointer;
+  min-width: 210px;
+}
+
+.tax-outline-btn:disabled,
+.tax-submit-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.tax-error {
+  margin-top: 10px;
+  color: #fca5a5;
+  font-weight: 600;
+}
+
+.print-report-area {
+  margin-top: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 14px;
+  background: rgba(2, 6, 23, 0.35);
+  padding: 14px;
+}
+
+.report-header h3 {
+  margin: 0 0 8px;
+  color: #f8fafc;
+}
+
+.company-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.3);
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+}
+
+.company-sub {
+  font-weight: 700;
+  color: #bae6fd !important;
+  margin-bottom: 8px !important;
+}
+
+.company-meta {
+  min-width: 230px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.report-client-block {
+  background: rgba(15, 23, 42, 0.3);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.report-header p {
+  margin: 4px 0;
+  color: #cbd5e1;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.tax-table-wrap {
+  overflow-x: auto;
+  margin-top: 12px;
+  margin-bottom: 16px;
+}
+
+.tax-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 700px;
+}
+
+.tax-table th,
+.tax-table td {
+  padding: 11px 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  text-align: left;
+  font-size: 0.9rem;
+  vertical-align: middle;
+  color: #e2e8f0;
+}
+
+.tax-table th {
+  color: #bae6fd;
+  font-weight: 700;
+  background: rgba(15, 23, 42, 0.7);
+}
+
+.tax-table .row-even td {
+  background: rgba(15, 23, 42, 0.18);
+}
+
+.tax-table .row-odd td {
+  background: rgba(2, 6, 23, 0.1);
+}
+
+.status-paid {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.2);
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  color: #86efac;
+  font-weight: 700;
+  font-size: 0.78rem;
+}
+
+.tax-table tfoot td {
+  font-weight: 700;
+  color: #f8fafc;
+  background: rgba(14, 165, 233, 0.18);
+}
+
+.tax-empty {
+  text-align: center !important;
+  color: #94a3b8 !important;
+  padding: 20px !important;
+  font-style: italic;
+  font-size: 0.92rem;
+}
+
+@media print {
+  .no-print,
+  .tasks-header,
+  .app-sidebar,
+  .tasks-bottom-nav {
+    display: none !important;
+  }
+
+  .tax-page {
+    background: #fff !important;
+    padding: 0 !important;
+  }
+
+  .tax-card {
+    margin: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: #fff !important;
+  }
+
+  .company-header,
+  .report-client-block,
+  .company-meta {
+    border-color: #222 !important;
+    background: #fff !important;
+  }
+
+  .print-report-area,
+  .tax-form,
+  .tax-table th,
+  .tax-table td,
+  .report-header p,
+  .report-header h3 {
+    color: #111 !important;
+    background: #fff !important;
+    border-color: #ddd !important;
+  }
+
+  .tax-table {
+    min-width: 100% !important;
+  }
+}
+
+@page {
+  size: A4;
+  margin: 14mm;
+}
+
+@media (max-width: 768px) {
+  .tax-page {
+    padding-bottom: 120px;
+  }
+
+  .tax-card {
+    margin: 14px 12px 0;
+  }
+
+  .tax-form {
+    padding: 14px;
+  }
+
+  .company-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .company-meta {
+    width: 100%;
+    min-width: 100%;
+  }
+
+  .tax-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tax-report-actions {
+    justify-content: stretch;
+    flex-direction: column;
+  }
+
+  .tax-outline-btn,
+  .tax-submit-btn {
+    width: 100%;
+    min-width: 100%;
+  }
+
+  .tax-table {
+    min-width: 560px;
+  }
+}

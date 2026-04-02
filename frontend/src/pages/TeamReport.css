@@ -1,0 +1,302 @@
+.team-report-page .team-tabs-card {
+  position: relative;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 16px;
+  padding: 6px;
+  margin-bottom: 12px;
+}
+
+.team-report-page .team-tabs-row {
+  display: flex;
+  gap: 8px;
+}
+
+.team-report-page .team-tab-btn {
+  flex: 1;
+  min-height: 44px;
+  border-radius: 12px;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.team-report-page .team-tab-btn:hover {
+  color: #e2e8f0;
+  background: rgba(30, 41, 59, 0.55);
+}
+
+.team-report-page .team-tab-btn.active {
+  background: linear-gradient(135deg, #2563eb, #06b6d4);
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(14, 165, 233, 0.28);
+}
+
+.team-report-page .team-filter-card {
+  background: rgba(15, 23, 42, 0.68);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.team-report-page .team-filter-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.team-report-page .team-filter-row label {
+  display: grid;
+  gap: 6px;
+}
+
+.team-report-page .team-filter-row span {
+  font-size: 12px;
+  color: #93c5fd;
+}
+
+.team-report-page .team-filter-row input {
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(2, 6, 23, 0.6);
+  color: #e2e8f0;
+  padding: 0 10px;
+}
+
+.team-report-page .team-filter-row button {
+  height: 40px;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, #2563eb, #06b6d4);
+  color: #fff;
+  font-weight: 700;
+  padding: 0 16px;
+  cursor: pointer;
+}
+
+.team-report-page .team-toast {
+  position: fixed;
+  top: 78px;
+  right: 14px;
+  z-index: 999;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.35);
+  backdrop-filter: blur(6px);
+  animation: team-toast-in 0.18s ease;
+}
+
+.team-report-page .team-toast.success {
+  color: #bbf7d0;
+  background: rgba(22, 101, 52, 0.9);
+  border-color: rgba(74, 222, 128, 0.45);
+}
+
+.team-report-page .team-toast.error {
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.9);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+@keyframes team-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.team-report-page .team-kpis-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.team-report-page .team-kpi-card {
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.team-report-page .team-kpi-card h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+.team-report-page .team-kpi-card strong {
+  font-size: 20px;
+  color: #f8fafc;
+}
+
+.team-report-page .team-levels-card {
+  background: rgba(15, 23, 42, 0.62);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.team-report-page .team-levels-card h2 {
+  margin: 0 0 10px;
+  font-size: 16px;
+  color: #e2e8f0;
+}
+
+.team-report-page .team-levels-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.team-report-page .team-level-item {
+  background: rgba(2, 6, 23, 0.52);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.team-report-page .team-level-item header {
+  font-weight: 700;
+  color: #7dd3fc;
+  margin-bottom: 8px;
+}
+
+.team-report-page .team-level-item p {
+  margin: 4px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.team-report-page .team-level-item strong {
+  color: #f8fafc;
+}
+
+.team-report-page .team-level-switch {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.team-report-page .team-level-switch button {
+  min-height: 36px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(2, 6, 23, 0.45);
+  color: #cbd5e1;
+  padding: 0 12px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.team-report-page .team-level-switch button.active {
+  background: linear-gradient(135deg, #2563eb, #06b6d4);
+  color: #fff;
+  border-color: transparent;
+}
+
+.team-report-page .team-kpi-single {
+  margin-bottom: 12px;
+}
+
+.team-report-page .team-members-list {
+  display: grid;
+  gap: 10px;
+}
+
+.team-report-page .team-member-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.team-report-page .team-member-item h4 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 15px;
+}
+
+.team-report-page .team-member-item p {
+  margin: 2px 0;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.team-report-page .team-member-item small {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.team-report-page .team-member-right {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+}
+
+.team-report-page .team-member-right strong {
+  color: #f8fafc;
+  font-size: 14px;
+}
+
+.team-report-page .team-member-right span {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.team-report-page .team-member-right span.ok {
+  color: #bbf7d0;
+  background: rgba(22, 101, 52, 0.55);
+  border: 1px solid rgba(74, 222, 128, 0.38);
+}
+
+.team-report-page .team-member-right span.pending {
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.45);
+  border: 1px solid rgba(251, 191, 36, 0.34);
+}
+
+.team-report-page .team-empty {
+  text-align: center;
+  background: rgba(2, 6, 23, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 14px;
+  padding: 28px 12px;
+  color: #94a3b8;
+}
+
+@media (max-width: 640px) {
+  .team-report-page .team-filter-row {
+    grid-template-columns: 1fr;
+  }
+
+  .team-report-page .team-kpis-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .team-report-page .team-level-switch {
+    flex-wrap: wrap;
+  }
+}

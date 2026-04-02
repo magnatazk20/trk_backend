@@ -1,0 +1,240 @@
+.bankcards-page {
+  min-height: 100vh;
+  color: var(--text-primary, #e5e7eb);
+}
+
+.bankcards-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+.bankcards-topbar h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.bankcards-back {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke-subtle, #334155);
+  background: var(--field-bg, #0f172a);
+  color: var(--text-primary, #e5e7eb);
+  cursor: pointer;
+}
+
+.bankcards-wrap {
+  padding: 0 16px 24px;
+}
+
+.bankcards-type-section {
+  margin-bottom: 24px;
+}
+
+.bankcards-label {
+  display: block;
+  color: var(--text-primary, #e5e7eb);
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+
+.bankcards-label span {
+  color: #ef4444;
+}
+
+.bankcards-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.bankcards-type-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px;
+  border-radius: 12px;
+  border: 2px solid transparent;
+  background: rgba(15, 23, 42, 0.6);
+  color: var(--text-primary, #e5e7eb);
+}
+
+.bankcards-type-btn.active {
+  border-color: #06b6d4;
+  background: rgba(6, 182, 212, 0.1);
+}
+
+.bankcards-type-btn svg {
+  width: 32px;
+  height: 32px;
+  margin-bottom: 8px;
+  stroke: #22d3ee;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.bankcards-form {
+  display: grid;
+  gap: 16px;
+}
+
+.bankcards-select-wrap {
+  position: relative;
+}
+
+.bankcards-select,
+.bankcards-input {
+  width: 100%;
+  background: var(--field-bg, #0f172a);
+  color: var(--text-primary, #e5e7eb);
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--stroke-subtle, #334155);
+  outline: none;
+}
+
+.bankcards-input.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+
+.bankcards-select:focus,
+.bankcards-input:focus {
+  border-color: #06b6d4;
+  box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.2);
+}
+
+.bankcards-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--field-bg, #0f172a);
+  border: 1px solid var(--stroke-subtle, #334155);
+  border-radius: 12px;
+  padding: 14px;
+  color: var(--text-primary, #e5e7eb);
+  cursor: pointer;
+}
+
+.toggle {
+  width: 48px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--stroke-subtle, #334155);
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  transition: background 0.2s;
+}
+
+.toggle .dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #fff;
+  transform: translateX(0);
+  transition: transform 0.2s;
+}
+
+.toggle.on {
+  background: #06b6d4;
+}
+
+.toggle.on .dot {
+  transform: translateX(24px);
+}
+
+.bankcards-submit {
+  width: 100%;
+  background: linear-gradient(90deg, #06b6d4, #3b82f6);
+  color: #fff;
+  border: 0;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 18px;
+  padding: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.bankcards-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bankcards-submit svg {
+  width: 24px;
+  height: 24px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.bankcards-security-box {
+  margin-top: 24px;
+  background: rgba(6, 182, 212, 0.1);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.bankcards-security-box p {
+  margin: 0;
+  color: #22d3ee;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.bankcards-feedback {
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+
+.bankcards-toast {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 9999;
+  min-width: 220px;
+  max-width: 360px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  box-shadow: 0 10px 25px rgba(2, 6, 23, 0.35);
+  font-weight: 600;
+  backdrop-filter: blur(8px);
+  animation: bankcards-toast-in 0.2s ease;
+}
+
+.bankcards-toast.success {
+  color: #bbf7d0;
+  background: rgba(22, 163, 74, 0.2);
+  border-color: rgba(34, 197, 94, 0.45);
+}
+
+.bankcards-toast.error {
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.25);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+@keyframes bankcards-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

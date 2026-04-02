@@ -1,0 +1,217 @@
+.sinuca-page {
+  min-height: 100vh;
+  padding: 20px;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(59, 130, 246, 0.2), transparent 30%),
+    radial-gradient(circle at 80% 20%, rgba(16, 185, 129, 0.2), transparent 30%),
+    linear-gradient(145deg, #020617, #0b1220 45%, #111827);
+  color: #e5e7eb;
+}
+
+.sinuca-shell {
+  max-width: 1240px;
+  margin: 0 auto;
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 22px;
+  padding: 18px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.sinuca-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.sinuca-header h1 {
+  margin: 0;
+  font-size: clamp(1.2rem, 2vw, 1.9rem);
+}
+
+.sinuca-header p {
+  margin: 6px 0 0;
+  color: #94a3b8;
+  font-size: 0.92rem;
+}
+
+.sinuca-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sinuca-link,
+.sinuca-reset {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.sinuca-link {
+  color: #0f172a;
+  background: linear-gradient(135deg, #67e8f9, #c4b5fd);
+}
+
+.sinuca-reset {
+  color: #f8fafc;
+  background: #1e293b;
+}
+
+.sinuca-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 12px;
+  align-items: start;
+}
+
+.sinuca-table-area {
+  display: grid;
+  gap: 10px;
+}
+
+.sinuca-board canvas {
+  width: 100%;
+  height: auto;
+  border-radius: 16px;
+  border: 2px solid rgba(248, 250, 252, 0.2);
+  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.4);
+  background: #0f6b3b;
+  cursor: crosshair;
+}
+
+.pocket-lane {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.9), rgba(2, 6, 23, 0.92));
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 14px;
+  padding: 12px;
+  min-height: 100%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.pocket-lane h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.pocket-sub {
+  margin: 6px 0 10px;
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+
+.pocket-track {
+  border-radius: 10px;
+  border: 1px dashed rgba(148, 163, 184, 0.28);
+  background: linear-gradient(180deg, rgba(2, 6, 23, 0.8), rgba(15, 23, 42, 0.65));
+  padding: 10px;
+  min-height: 220px;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+}
+
+.pocket-empty {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.pocket-ball {
+  --ball-color: #e2e8f0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  font-size: 0.68rem;
+  font-weight: 800;
+  color: #0f172a;
+  background:
+    radial-gradient(circle at 30% 30%, #fff 0%, rgba(255, 255, 255, 0.88) 20%, var(--ball-color) 58%, #111827 100%);
+  box-shadow: 0 5px 12px rgba(0, 0, 0, 0.38);
+  animation: pocketDrop 0.5s ease both;
+}
+
+.pocket-ball.stripe {
+  position: relative;
+  color: #111827;
+  overflow: hidden;
+}
+
+.pocket-ball.stripe::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  top: 11px;
+  height: 8px;
+  background: #fff;
+  border-radius: 999px;
+}
+
+.pocket-ball.stripe::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
+}
+
+@keyframes pocketDrop {
+  0% {
+    transform: translateY(-18px) scale(0.85);
+    opacity: 0;
+  }
+  70% {
+    transform: translateY(2px) scale(1.02);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+.hud {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.hud p {
+  margin: 0;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  padding: 9px 10px;
+  color: #cbd5e1;
+  font-size: 0.88rem;
+}
+
+@media (max-width: 1100px) {
+  .sinuca-board {
+    grid-template-columns: 1fr;
+  }
+
+  .pocket-track {
+    min-height: 120px;
+  }
+}
+
+@media (max-width: 900px) {
+  .sinuca-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .hud {
+    grid-template-columns: 1fr;
+  }
+}
