@@ -3522,6 +3522,59 @@ app.post('/api/admin/withdraw-config', requireMaxAdmin, async (req, res) => {
   }
 })
 
+app.get('/api/site-settings', async (_req, res) => {
+  try {
+    await pool.query(
+      `
+      CREATE TABLE IF NOT EXISTS site_settings (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        site_title VARCHAR(150) NOT NULL DEFAULT '',
+        site_description TEXT NULL,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+      `
+    )
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        site_title AS siteTitle,
+        site_description AS siteDescription,
+        updated_at AS updatedAt
+      FROM site_settings
+      ORDER BY id ASC
+      LIMIT 1
+      `
+    )
+
+    if (rows.length === 0) {
+      res.json({
+        ok: true,
+        settings: {
+          siteTitle: '',
+          siteDescription: '',
+          updatedAt: null,
+        },
+      })
+      return
+    }
+
+    res.json({
+      ok: true,
+      settings: {
+        siteTitle: String(rows[0].siteTitle ?? ''),
+        siteDescription: String(rows[0].siteDescription ?? ''),
+        updatedAt: rows[0].updatedAt ?? null,
+      },
+    })
+  } catch (err) {
+    console.error('[site-settings-get-public]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar configurações públicas do site.' })
+  }
+})
+
 app.get('/api/admin/site-settings', requireMaxAdmin, async (_req, res) => {
   try {
     await pool.query(
