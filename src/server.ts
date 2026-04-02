@@ -3522,6 +3522,135 @@ app.post('/api/admin/withdraw-config', requireMaxAdmin, async (req, res) => {
   }
 })
 
+app.get('/api/admin/site-settings', requireMaxAdmin, async (_req, res) => {
+  try {
+    await pool.query(
+      `
+      CREATE TABLE IF NOT EXISTS site_settings (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        site_title VARCHAR(150) NOT NULL DEFAULT '',
+        site_description TEXT NULL,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+      `
+    )
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        id,
+        site_title AS siteTitle,
+        site_description AS siteDescription,
+        updated_at AS updatedAt
+      FROM site_settings
+      ORDER BY id ASC
+      LIMIT 1
+      `
+    )
+
+    if (rows.length === 0) {
+      await pool.query(
+        `
+        INSERT INTO site_settings (site_title, site_description)
+        VALUES ('', '')
+        `
+      )
+
+      res.json({
+        ok: true,
+        settings: {
+          siteTitle: '',
+          siteDescription: '',
+          updatedAt: null,
+        },
+      })
+      return
+    }
+
+    res.json({
+      ok: true,
+      settings: {
+        siteTitle: String(rows[0].siteTitle ?? ''),
+        siteDescription: String(rows[0].siteDescription ?? ''),
+        updatedAt: rows[0].updatedAt ?? null,
+      },
+    })
+  } catch (err) {
+    console.error('[admin-site-settings-get]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar configurações do site.' })
+  }
+})
+
+app.post('/api/admin/site-settings', requireMaxAdmin, async (req, res) => {
+  const { siteTitle, siteDescription } = req.body as {
+    siteTitle?: string
+    siteDescription?: string
+  }
+
+  const parsedSiteTitle = String(siteTitle ?? '').trim()
+  const parsedSiteDescription = String(siteDescription ?? '').trim()
+
+  if (!parsedSiteTitle) {
+    res.status(400).json({ ok: false, error: 'Título do site é obrigatório.' })
+    return
+  }
+
+  try {
+    await pool.query(
+      `
+      CREATE TABLE IF NOT EXISTS site_settings (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        site_title VARCHAR(150) NOT NULL DEFAULT '',
+        site_description TEXT NULL,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+      `
+    )
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      'SELECT id FROM site_settings ORDER BY id ASC LIMIT 1'
+    )
+
+    if (rows.length === 0) {
+      await pool.query(
+        `
+        INSERT INTO site_settings (site_title, site_description)
+        VALUES (?, ?)
+        `,
+        [parsedSiteTitle, parsedSiteDescription]
+      )
+    } else {
+      await pool.query(
+        `
+        UPDATE site_settings
+        SET
+          site_title = ?,
+          site_description = ?,
+          updated_at = NOW()
+        WHERE id = ?
+        `,
+        [parsedSiteTitle, parsedSiteDescription, Number(rows[0].id)]
+      )
+    }
+
+    res.json({
+      ok: true,
+      message: 'Configurações do site salvas com sucesso.',
+      settings: {
+        siteTitle: parsedSiteTitle,
+        siteDescription: parsedSiteDescription,
+      },
+    })
+  } catch (err) {
+    console.error('[admin-site-settings-save]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao salvar configurações do site.' })
+  }
+})
+
 app.get('/api/admin/overview', requireMaxAdmin, async (_req, res) => {
   try {
     const [activeUsersRows] = await pool.query<RowDataPacket[]>(

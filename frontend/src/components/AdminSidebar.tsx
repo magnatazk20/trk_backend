@@ -67,7 +67,7 @@ export default function AdminSidebar() {
           <button type="button" className="dash-nav-item" onClick={() => { navigate('/adf/rankings'); setMenuOpen(false) }}>Ganhos e Saques</button>
 
           <p className="dash-nav-group-title">Sistema</p>
-          <button type="button" className="dash-nav-item" onClick={() => { navigate('/dashboard'); setMenuOpen(false) }}>Ver App Usuário</button>
+          <button type="button" className="dash-nav-item" onClick={() => { navigate('/adf/site-settings'); setMenuOpen(false) }}>Editar Site</button>
           <button type="button" className="dash-nav-item" onClick={() => { navigate('/profile'); setMenuOpen(false) }}>Perfil</button>
         </nav>
 

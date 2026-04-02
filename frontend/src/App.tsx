@@ -27,6 +27,7 @@ import AdminUserDetails from './pages/AdminUserDetails'
 import AdminUserHistory from './pages/AdminUserHistory'
 import AdminWithdrawConfig from './pages/AdminWithdrawConfig'
 import AdminRankings from './pages/AdminRankings'
+import AdminSiteSettings from './pages/AdminSiteSettings'
 import RequireAuth from './components/RequireAuth'
 import RequireMaxAdmin from './components/RequireMaxAdmin'
 import './App.css'
@@ -127,6 +128,14 @@ export default function App() {
           element={(
             <RequireMaxAdmin>
               <AdminRankings />
+            </RequireMaxAdmin>
+          )}
+        />
+        <Route
+          path="/adf/site-settings"
+          element={(
+            <RequireMaxAdmin>
+              <AdminSiteSettings />
             </RequireMaxAdmin>
           )}
         />
