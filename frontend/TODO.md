@@ -1,5 +1,0 @@
-- [x] Atualizar tipos em AdminUserDetails.tsx para incluir referralsLevel1/2/3
-- [x] Adicionar seção visual no fim da página com Convites Nível 1, 2 e 3
-- [x] Exibir status de depósito e total depositado por convidado
-- [x] Adicionar estado vazio quando não houver convidados por nível
-- [ ] Ajustar CSS se necessário
