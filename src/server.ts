@@ -4556,6 +4556,18 @@ app.get('/api/admin/logs', requireMaxAdmin, async (req, res) => {
       return 'other'
     }
 
+    const parseMetadata = (value: unknown) => {
+      if (value == null) return null
+      if (typeof value === 'object') return value as Record<string, unknown>
+      const raw = String(value).trim()
+      if (!raw) return null
+      try {
+        return JSON.parse(raw) as Record<string, unknown>
+      } catch {
+        return { raw }
+      }
+    }
+
     const mapped = rows.map((row) => {
       const parsedCategory = resolveCategory(String(row.action ?? ''), String(row.entityType ?? ''))
       return {
@@ -4570,7 +4582,7 @@ app.get('/api/admin/logs', requireMaxAdmin, async (req, res) => {
         oldBalance: row.oldBalance == null ? null : Number(row.oldBalance),
         newBalance: row.newBalance == null ? null : Number(row.newBalance),
         amount: row.amount == null ? null : Number(row.amount),
-        metadata: row.metadata == null ? null : String(row.metadata),
+        metadata: parseMetadata(row.metadata),
         createdAt: row.createdAt ? String(row.createdAt) : null,
       }
     })
