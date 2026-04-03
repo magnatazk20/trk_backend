@@ -4732,10 +4732,11 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
           created_at
         FROM logs
         WHERE user_id = ?
+           OR (entity_type = 'user' AND entity_id = ?)
         ORDER BY id DESC
         LIMIT 100
         `,
-        [userId]
+        [userId, userId]
       )
       accountLogs = logRows.map((row) => ({
         id: Number(row.id),
