@@ -4344,6 +4344,13 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
     notes,
     startsAt,
     expiresAt,
+    isListedForSale,
+    imageUrl,
+    salePrice,
+    description,
+    discountCoupon,
+    discountPercent,
+    productName,
   } = req.body as {
     code?: string
     rewardType?: string
@@ -4352,6 +4359,13 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
     notes?: string
     startsAt?: string | null
     expiresAt?: string | null
+    isListedForSale?: boolean | number | string
+    imageUrl?: string | null
+    salePrice?: number | string | null
+    description?: string | null
+    discountCoupon?: string | null
+    discountPercent?: number | string | null
+    productName?: string | null
   }
 
   const normalizedCode = String(code ?? '').trim().toUpperCase()
@@ -4361,6 +4375,24 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
   const normalizedNotes = String(notes ?? '').trim()
   const normalizedStartsAt = startsAt ? String(startsAt).trim() : null
   const normalizedExpiresAt = expiresAt ? String(expiresAt).trim() : null
+
+  const normalizedIsListedForSale =
+    isListedForSale === true ||
+    isListedForSale === 1 ||
+    String(isListedForSale ?? '').toLowerCase() === 'true'
+
+  const normalizedImageUrl = String(imageUrl ?? '').trim()
+  const normalizedDescription = String(description ?? '').trim()
+  const normalizedProductName = String(productName ?? '').trim()
+  const normalizedDiscountCoupon = String(discountCoupon ?? '').trim().toUpperCase()
+  const normalizedSalePrice =
+    salePrice == null || String(salePrice).trim() === ''
+      ? null
+      : Number(String(salePrice).replace(',', '.'))
+  const normalizedDiscountPercent =
+    discountPercent == null || String(discountPercent).trim() === ''
+      ? null
+      : Number(String(discountPercent).replace(',', '.'))
 
   if (!normalizedCode) {
     res.status(400).json({ ok: false, error: 'Código é obrigatório.' })
@@ -4375,6 +4407,31 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
   if (!Number.isInteger(normalizedMaxTotalUses) || normalizedMaxTotalUses <= 0) {
     res.status(400).json({ ok: false, error: 'Limite máximo de usos inválido.' })
     return
+  }
+
+  if (normalizedIsListedForSale) {
+    if (!normalizedProductName) {
+      res.status(400).json({ ok: false, error: 'Nome do produto é obrigatório para venda.' })
+      return
+    }
+
+    if (!normalizedDescription) {
+      res.status(400).json({ ok: false, error: 'Descrição é obrigatória para venda.' })
+      return
+    }
+
+    if (!Number.isFinite(Number(normalizedSalePrice)) || Number(normalizedSalePrice) <= 0) {
+      res.status(400).json({ ok: false, error: 'Valor do vale presente inválido para venda.' })
+      return
+    }
+
+    if (
+      normalizedDiscountPercent != null &&
+      (!Number.isFinite(normalizedDiscountPercent) || normalizedDiscountPercent < 0 || normalizedDiscountPercent > 100)
+    ) {
+      res.status(400).json({ ok: false, error: 'Cupom de desconto (%) deve estar entre 0 e 100.' })
+      return
+    }
   }
 
   try {
@@ -4393,9 +4450,15 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
         is_active,
         starts_at,
         expires_at,
-        created_by_user_id
+        created_by_user_id,
+        is_listed_for_sale,
+        image_url,
+        sale_price,
+        description,
+        discount_coupon,
+        discount_percent
       )
-      VALUES (?, ?, ?, ?, 0, ?, 1, ?, ?, ?)
+      VALUES (?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         normalizedCode,
@@ -4406,6 +4469,12 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
         normalizedStartsAt || null,
         normalizedExpiresAt || null,
         Number(req.authUser?.id ?? 0) || null,
+        normalizedIsListedForSale ? 1 : 0,
+        normalizedImageUrl || null,
+        normalizedIsListedForSale ? Number(Number(normalizedSalePrice).toFixed(2)) : null,
+        normalizedDescription || null,
+        normalizedDiscountCoupon || null,
+        normalizedDiscountPercent == null ? null : Number(normalizedDiscountPercent.toFixed(2)),
       ]
     ) as any
 
@@ -4415,6 +4484,7 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
       giftCode: {
         id: Number(result?.insertId ?? 0),
         code: normalizedCode,
+        productName: normalizedProductName || normalizedCode,
         rewardType: normalizedRewardType,
         rewardValue: Number(normalizedRewardValue.toFixed(2)),
         maxTotalUses: normalizedMaxTotalUses,
@@ -4422,6 +4492,12 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
         notes: normalizedNotes,
         startsAt: normalizedStartsAt,
         expiresAt: normalizedExpiresAt,
+        isListedForSale: normalizedIsListedForSale,
+        imageUrl: normalizedImageUrl || null,
+        salePrice: normalizedIsListedForSale ? Number(Number(normalizedSalePrice).toFixed(2)) : null,
+        description: normalizedDescription || null,
+        discountCoupon: normalizedDiscountCoupon || null,
+        discountPercent: normalizedDiscountPercent == null ? null : Number(normalizedDiscountPercent.toFixed(2)),
       },
     })
   } catch (err: any) {
