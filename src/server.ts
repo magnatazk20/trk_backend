@@ -5910,6 +5910,32 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
   }
 })
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason)
+})
+
+process.on('uncaughtException', (error) => {
+  console.error('[uncaughtException]', error)
+})
+
+app.use((req, _res, next) => {
+  const startedAt = Date.now()
+  const requestId = Math.random().toString(36).slice(2, 10)
+
+  console.log(`[http] -> id=${requestId} ${req.method} ${req.originalUrl}`)
+
+  _res.on('finish', () => {
+    const ms = Date.now() - startedAt
+    console.log(
+      `[http] <- id=${requestId} ${req.method} ${req.originalUrl} status=${_res.statusCode} ${ms}ms`
+    )
+  })
+
+  next()
+})
+
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`)
+  console.log('📋 HTTP request logging: enabled')
+  console.log('🧯 Global error logging: enabled')
 })
