@@ -3335,32 +3335,47 @@ const ensureGiftCodeTables = async () => {
     `
   )
 
-  try {
-    await pool.query(
-      `
-      ALTER TABLE gift_codes
-      ADD COLUMN starts_at DATETIME NULL
-      `
-    )
-  } catch {}
+  const tryAlter = async (sql: string) => {
+    try {
+      await pool.query(sql)
+    } catch (err: any) {
+      const msg = String(err?.message ?? '').toLowerCase()
+      const code = String(err?.code ?? '')
+      const ignorable =
+        code === 'ER_DUP_FIELDNAME' ||
+        code === 'ER_BAD_FIELD_ERROR' ||
+        code === 'ER_CANT_DROP_FIELD_OR_KEY' ||
+        msg.includes('duplicate column name') ||
+        msg.includes('already exists') ||
+        msg.includes('check that column/key exists')
+      if (!ignorable) throw err
+    }
+  }
 
-  try {
-    await pool.query(
-      `
-      ALTER TABLE gift_codes
-      ADD COLUMN expires_at DATETIME NULL
-      `
-    )
-  } catch {}
+  await tryAlter(`
+    ALTER TABLE gift_codes
+    ADD COLUMN starts_at DATETIME NULL
+  `)
 
-  try {
-    await pool.query(
-      `
-      ALTER TABLE gift_codes
-      ADD COLUMN created_by_user_id BIGINT UNSIGNED NULL
-      `
-    )
-  } catch {}
+  await tryAlter(`
+    ALTER TABLE gift_codes
+    ADD COLUMN expires_at DATETIME NULL
+  `)
+
+  await tryAlter(`
+    ALTER TABLE gift_codes
+    ADD COLUMN created_by_user_id BIGINT UNSIGNED NULL
+  `)
+
+  await tryAlter(`
+    ALTER TABLE gift_codes
+    MODIFY COLUMN reward_type VARCHAR(50) NOT NULL DEFAULT 'balance_credit'
+  `)
+
+  await tryAlter(`
+    ALTER TABLE gift_code_redemptions
+    MODIFY COLUMN metadata JSON NULL
+  `)
 }
 
 app.get('/api/admin/gift-codes', requireMaxAdmin, async (_req, res) => {
@@ -3405,7 +3420,10 @@ app.get('/api/admin/gift-codes', requireMaxAdmin, async (_req, res) => {
     res.json({ ok: true, giftCodes })
   } catch (err) {
     console.error('[admin-gift-codes-list]', err)
-    res.status(500).json({ ok: false, error: 'Erro ao listar códigos de presente.' })
+    const details = process.env.NODE_ENV === 'production'
+      ? undefined
+      : String((err as any)?.message ?? err)
+    res.status(500).json({ ok: false, error: 'Erro ao listar códigos de presente.', details })
   }
 })
 
