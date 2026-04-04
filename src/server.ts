@@ -16,6 +16,7 @@ const JWT_SECRET   = process.env.JWT_SECRET   ?? 'fallback_secret'
 const JWT_EXPIRES  = process.env.JWT_EXPIRES_IN ?? '7d'
 const LUMO_API_KEY = 'pk_69aa7a3d1a07dffe750eb533c92fabbe87974479ed791fb7ead328a56e67143d'
 const LUMO_WEBHOOK_SECRET = 'sk_8910b90244b35ab56342bc3c019e569bb59abb9a90a7f69ad1dd59ce59ebd1065dc6240536d0a7b2e69496f8bac1dcdb739d22767183e2421b590f1fbfb77e39'
+const LUMOPAY_TRANSFER_URL = 'https://api.lumopayment.com/api/payments/transfers/pix'
 const SAO_PAULO_TZ = 'America/Sao_Paulo'
 
 const getSaoPauloDateString = () =>
@@ -31,6 +32,46 @@ const normalizePixType = (pixTypeRaw: string) => {
   const allowed = ['CPF', 'CNPJ', 'EMAIL', 'TELEFONE', 'CHAVE_ALEATORIA'] as const
   if ((allowed as readonly string[]).includes(type)) return type
   return 'CHAVE_ALEATORIA'
+}
+
+const mapPixTypeToLumopay = (pixTypeRaw: string) => {
+  const raw = String(pixTypeRaw ?? '').trim().toUpperCase()
+  const mapped: Record<string, string> = {
+    TELEFONE: 'PHONE',
+    PHONE: 'PHONE',
+    CPF: 'CPF',
+    CNPJ: 'CNPJ',
+    EMAIL: 'EMAIL',
+    CHAVE_ALEATORIA: 'EVP',
+    EVP: 'EVP',
+    RANDOM: 'EVP',
+    CRIPTO: 'EVP',
+  }
+  return mapped[raw] ?? 'EVP'
+}
+
+const normalizeLumopayPixKey = (pixKeyRaw: string, lumopayPixType: string) => {
+  const key = String(pixKeyRaw ?? '').trim()
+  switch (lumopayPixType) {
+    case 'CPF':
+    case 'CNPJ':
+      return key.replace(/\D/g, '')
+    case 'PHONE': {
+      let numbers = key.replace(/\D/g, '')
+      if (numbers.startsWith('55') && numbers.length > 11) numbers = numbers.slice(2)
+      if (numbers.length === 10) {
+        const ddd = numbers.slice(0, 2)
+        const phone = numbers.slice(2)
+        numbers = `${ddd}9${phone}`
+      }
+      return numbers
+    }
+    case 'EMAIL':
+      return key.toLowerCase()
+    case 'EVP':
+    default:
+      return key
+  }
 }
 
 const normalizePixKey = (pixKeyRaw: string, pixType: string) => {
@@ -4574,14 +4615,94 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
       return
     }
 
-    const nextStatus = parsedAction === 'approve' ? 'paid' : 'failed'
+    let nextStatus = parsedAction === 'approve' ? 'processing' : 'failed'
     const amount = Number(withdrawal.amount ?? 0)
     const userId = Number(withdrawal.userId)
+    let providerTransactionId: string | null = null
+    let providerResponsePayload: any = null
 
-    const providerTransactionId =
-      parsedAction === 'approve'
-        ? `${parsedProvider.toUpperCase()}-${Date.now()}-${withdrawalId}`
-        : null
+    if (parsedAction === 'approve') {
+      const [pixRows] = await conn.query<RowDataPacket[]>(
+        `
+        SELECT holder_name AS holderName, holder_cpf AS holderCpf, pix_key_type AS pixKeyType, pix_key AS pixKey
+        FROM withdrawals
+        WHERE id = ?
+        LIMIT 1
+        FOR UPDATE
+        `,
+        [withdrawalId]
+      )
+
+      if (pixRows.length === 0) {
+        await conn.rollback()
+        res.status(404).json({ ok: false, error: 'Dados PIX do saque não encontrados.' })
+        return
+      }
+
+      const holderName = String(pixRows[0].holderName ?? '').trim()
+      const holderCpf = String(pixRows[0].holderCpf ?? '').replace(/\D/g, '')
+      const pixKeyTypeRaw = String(pixRows[0].pixKeyType ?? 'CHAVE_ALEATORIA')
+      const pixKeyRaw = String(pixRows[0].pixKey ?? '')
+
+      const lumopayPixType = mapPixTypeToLumopay(pixKeyTypeRaw)
+      const lumopayPixKey = normalizeLumopayPixKey(pixKeyRaw, lumopayPixType)
+
+      if (!holderName || holderCpf.length < 11 || !lumopayPixKey) {
+        await conn.rollback()
+        res.status(400).json({ ok: false, error: 'Dados PIX inválidos para envio ao provedor.' })
+        return
+      }
+
+      const cashoutPayload = {
+        amount: Number(amount.toFixed(2)),
+        pixKey: lumopayPixKey,
+        pixKeyType: lumopayPixType,
+        description: `Saque PIX #${withdrawalId}`,
+      }
+
+      const providerRes = await fetch(LUMOPAY_TRANSFER_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': LUMO_API_KEY,
+        },
+        body: JSON.stringify(cashoutPayload),
+      })
+
+      providerResponsePayload = await providerRes.json().catch(() => ({}))
+
+      if (!providerRes.ok || providerResponsePayload?.success === false) {
+        await conn.rollback()
+        res.status(502).json({
+          ok: false,
+          error: String(providerResponsePayload?.message ?? providerResponsePayload?.error ?? 'Falha ao processar saque na Lumopay.'),
+          provider: providerResponsePayload,
+        })
+        return
+      }
+
+      providerTransactionId =
+        String(
+          providerResponsePayload?.data?.external_id ??
+          providerResponsePayload?.data?.transaction_id ??
+          providerResponsePayload?.transaction_id ??
+          providerResponsePayload?.idTransaction ??
+          ''
+        ).trim() || null
+
+      const providerStatusRaw = String(
+        providerResponsePayload?.data?.status ??
+        providerResponsePayload?.status ??
+        'processing'
+      ).toLowerCase()
+
+      nextStatus =
+        providerStatusRaw === 'paid' || providerStatusRaw === 'payment.paid'
+          ? 'paid'
+          : providerStatusRaw === 'failed' || providerStatusRaw === 'canceled' || providerStatusRaw === 'cancelled'
+            ? 'failed'
+            : 'processing'
+    }
 
     await conn.query(
       `
@@ -4589,15 +4710,11 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
       SET
         status = ?,
         provider_transaction_id = CASE
-          WHEN ? = 'paid' THEN COALESCE(?, provider_transaction_id)
+          WHEN ? IN ('processing', 'paid') THEN COALESCE(?, provider_transaction_id)
           ELSE provider_transaction_id
         END,
         provider_payload = CASE
-          WHEN ? = 'paid' THEN JSON_OBJECT(
-            'provider', ?,
-            'processedByAdminId', ?,
-            'processedAt', NOW()
-          )
+          WHEN ? IN ('processing', 'paid') THEN ?
           ELSE provider_payload
         END,
         paid_at = CASE WHEN ? = 'paid' THEN NOW() ELSE paid_at END,
@@ -4609,8 +4726,16 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
         nextStatus,
         providerTransactionId,
         nextStatus,
-        parsedAction === 'approve' ? parsedProvider : null,
-        Number(req.authUser?.id ?? 0),
+        parsedAction === 'approve'
+          ? JSON.stringify({
+              provider: 'lumopay',
+              selectedProvider: parsedProvider,
+              processedByAdminId: Number(req.authUser?.id ?? 0),
+              processedAt: new Date().toISOString(),
+              request: { amount },
+              response: providerResponsePayload,
+            })
+          : null,
         nextStatus,
         withdrawalId,
       ]
@@ -4688,7 +4813,7 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
     res.json({
       ok: true,
       message: parsedAction === 'approve'
-        ? `Saque aprovado com sucesso via ${parsedProvider.toUpperCase()}.`
+        ? `Saque enviado com sucesso para processamento via Lumopay (${parsedProvider.toUpperCase()}).`
         : refunded
           ? 'Saque cancelado e valor estornado com sucesso.'
           : 'Saque cancelado sem estorno.',
