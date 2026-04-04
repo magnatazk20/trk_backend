@@ -3532,6 +3532,55 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
   }
 })
 
+app.delete('/api/admin/gift-codes/:id', requireMaxAdmin, async (req, res) => {
+  const giftCodeId = Number(req.params.id)
+
+  if (!giftCodeId || Number.isNaN(giftCodeId)) {
+    res.status(400).json({ ok: false, error: 'ID do código inválido.' })
+    return
+  }
+
+  const conn = await pool.getConnection()
+  try {
+    await ensureGiftCodeTables()
+    await conn.beginTransaction()
+
+    const [existsRows] = await conn.query<RowDataPacket[]>(
+      'SELECT id, code FROM gift_codes WHERE id = ? LIMIT 1 FOR UPDATE',
+      [giftCodeId]
+    )
+
+    if (existsRows.length === 0) {
+      await conn.rollback()
+      res.status(404).json({ ok: false, error: 'Código não encontrado.' })
+      return
+    }
+
+    await conn.query(
+      'DELETE FROM gift_code_redemptions WHERE gift_code_id = ?',
+      [giftCodeId]
+    )
+
+    await conn.query(
+      'DELETE FROM gift_codes WHERE id = ?',
+      [giftCodeId]
+    )
+
+    await conn.commit()
+    res.json({
+      ok: true,
+      message: `Código ${String(existsRows[0].code ?? '')} apagado com sucesso.`,
+      deletedId: giftCodeId,
+    })
+  } catch (err) {
+    await conn.rollback()
+    console.error('[admin-gift-codes-delete]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao apagar código de presente.' })
+  } finally {
+    conn.release()
+  }
+})
+
 app.post('/api/gift-codes/redeem', async (req, res) => {
   const { userId, code } = req.body as { userId?: number; code?: string }
 
