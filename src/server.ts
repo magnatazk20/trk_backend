@@ -3749,6 +3749,46 @@ app.post('/api/withdraw/webhook', async (req, res) => {
   }
 })
 
+const ensureGiftVoucherTables = async () => {
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS gift_vouchers (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(150) NOT NULL,
+      description TEXT NULL,
+      image_url VARCHAR(500) NULL,
+      price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      discount_coupon VARCHAR(80) NOT NULL,
+      redeem_reward_value DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_gift_vouchers_discount_coupon (discount_coupon),
+      KEY idx_gift_vouchers_active (is_active)
+    )
+    `
+  )
+
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS gift_voucher_purchases (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      gift_voucher_id BIGINT UNSIGNED NOT NULL,
+      paid_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      discount_coupon VARCHAR(80) NOT NULL,
+      redeem_reward_value DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      status ENUM('paid','cancelled') NOT NULL DEFAULT 'paid',
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_gift_voucher_purchases_user (user_id),
+      KEY idx_gift_voucher_purchases_voucher (gift_voucher_id)
+    )
+    `
+  )
+}
+
 const ensureGiftCodeTables = async () => {
   await pool.query(
     `
@@ -3840,6 +3880,267 @@ const ensureGiftCodeTables = async () => {
     MODIFY COLUMN metadata JSON NULL
   `)
 }
+
+app.get('/api/gift-vouchers', requireAuth, async (_req, res) => {
+  try {
+    await ensureGiftVoucherTables()
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        id,
+        name,
+        description,
+        image_url AS imageUrl,
+        price,
+        discount_coupon AS discountCoupon,
+        redeem_reward_value AS redeemRewardValue,
+        is_active AS isActive,
+        created_at AS createdAt
+      FROM gift_vouchers
+      WHERE is_active = 1
+      ORDER BY id DESC
+      `
+    )
+
+    const vouchers = rows.map((row) => ({
+      id: Number(row.id),
+      name: String(row.name ?? ''),
+      description: String(row.description ?? ''),
+      imageUrl: String(row.imageUrl ?? ''),
+      price: Number(row.price ?? 0),
+      discountCoupon: String(row.discountCoupon ?? ''),
+      redeemRewardValue: Number(row.redeemRewardValue ?? 0),
+      isActive: Number(row.isActive ?? 0) === 1,
+      createdAt: row.createdAt ?? null,
+    }))
+
+    res.json({ ok: true, vouchers })
+  } catch (err) {
+    console.error('[gift-vouchers-list]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao listar vales presentes.' })
+  }
+})
+
+app.post('/api/gift-vouchers', requireMaxAdmin, async (req, res) => {
+  const { name, description, imageUrl, price, discountCoupon, redeemRewardValue } = req.body as {
+    name?: string
+    description?: string
+    imageUrl?: string
+    price?: number | string
+    discountCoupon?: string
+    redeemRewardValue?: number | string
+  }
+
+  const parsedName = String(name ?? '').trim()
+  const parsedDescription = String(description ?? '').trim()
+  const parsedImageUrl = String(imageUrl ?? '').trim()
+  const parsedPrice = Number(String(price ?? '0').replace(',', '.'))
+  const parsedDiscountCoupon = String(discountCoupon ?? '').trim().toUpperCase()
+  const parsedRedeemRewardValue = Number(String(redeemRewardValue ?? '0').replace(',', '.'))
+
+  if (!parsedName) {
+    res.status(400).json({ ok: false, error: 'Nome do vale é obrigatório.' })
+    return
+  }
+
+  if (!parsedDiscountCoupon) {
+    res.status(400).json({ ok: false, error: 'Cupom de desconto é obrigatório.' })
+    return
+  }
+
+  if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
+    res.status(400).json({ ok: false, error: 'Valor do vale inválido.' })
+    return
+  }
+
+  if (!Number.isFinite(parsedRedeemRewardValue) || parsedRedeemRewardValue <= 0) {
+    res.status(400).json({ ok: false, error: 'Valor de resgate inválido.' })
+    return
+  }
+
+  try {
+    await ensureGiftVoucherTables()
+
+    const [result] = await pool.query(
+      `
+      INSERT INTO gift_vouchers
+      (
+        name,
+        description,
+        image_url,
+        price,
+        discount_coupon,
+        redeem_reward_value,
+        is_active
+      )
+      VALUES (?, ?, ?, ?, ?, ?, 1)
+      `,
+      [
+        parsedName,
+        parsedDescription || null,
+        parsedImageUrl || null,
+        Number(parsedPrice.toFixed(2)),
+        parsedDiscountCoupon,
+        Number(parsedRedeemRewardValue.toFixed(2)),
+      ]
+    ) as any
+
+    res.status(201).json({
+      ok: true,
+      message: 'Vale presente criado com sucesso.',
+      voucher: {
+        id: Number(result?.insertId ?? 0),
+        name: parsedName,
+        description: parsedDescription,
+        imageUrl: parsedImageUrl,
+        price: Number(parsedPrice.toFixed(2)),
+        discountCoupon: parsedDiscountCoupon,
+        redeemRewardValue: Number(parsedRedeemRewardValue.toFixed(2)),
+      },
+    })
+  } catch (err: any) {
+    if (String(err?.code ?? '') === 'ER_DUP_ENTRY') {
+      res.status(409).json({ ok: false, error: 'Cupom já existe.' })
+      return
+    }
+
+    console.error('[gift-vouchers-create]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao criar vale presente.' })
+  }
+})
+
+app.post('/api/gift-vouchers/purchase', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const { userId, giftVoucherId } = req.body as { userId?: number; giftVoucherId?: number }
+
+  const parsedUserId = Number(userId)
+  const parsedGiftVoucherId = Number(giftVoucherId)
+
+  if (!parsedUserId || Number.isNaN(parsedUserId)) {
+    res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  if (!parsedGiftVoucherId || Number.isNaN(parsedGiftVoucherId)) {
+    res.status(400).json({ ok: false, error: 'ID do vale inválido.' })
+    return
+  }
+
+  if (Number(req.authUser?.id ?? 0) !== parsedUserId) {
+    res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' })
+    return
+  }
+
+  const conn = await pool.getConnection()
+  try {
+    await ensureGiftVoucherTables()
+    await conn.beginTransaction()
+
+    const [userRows] = await conn.query<RowDataPacket[]>(
+      'SELECT id, balance FROM users WHERE id = ? LIMIT 1 FOR UPDATE',
+      [parsedUserId]
+    )
+
+    if (userRows.length === 0) {
+      await conn.rollback()
+      res.status(404).json({ ok: false, error: 'Usuário não encontrado.' })
+      return
+    }
+
+    const [voucherRows] = await conn.query<RowDataPacket[]>(
+      `
+      SELECT
+        id,
+        name,
+        price,
+        discount_coupon AS discountCoupon,
+        redeem_reward_value AS redeemRewardValue,
+        is_active AS isActive
+      FROM gift_vouchers
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [parsedGiftVoucherId]
+    )
+
+    if (voucherRows.length === 0 || Number(voucherRows[0].isActive ?? 0) !== 1) {
+      await conn.rollback()
+      res.status(404).json({ ok: false, error: 'Vale presente não encontrado ou inativo.' })
+      return
+    }
+
+    const currentBalance = Number(userRows[0].balance ?? 0)
+    const voucherPrice = Number(voucherRows[0].price ?? 0)
+
+    if (currentBalance < voucherPrice) {
+      await conn.rollback()
+      res.status(400).json({
+        ok: false,
+        error: 'Saldo insuficiente para comprar este vale.',
+        required: voucherPrice,
+        available: currentBalance,
+      })
+      return
+    }
+
+    const balanceAfter = Number((currentBalance - voucherPrice).toFixed(2))
+
+    await conn.query(
+      `
+      UPDATE users
+      SET balance = ?
+      WHERE id = ?
+      `,
+      [balanceAfter, parsedUserId]
+    )
+
+    const [purchaseResult] = await conn.query(
+      `
+      INSERT INTO gift_voucher_purchases
+      (
+        user_id,
+        gift_voucher_id,
+        paid_amount,
+        discount_coupon,
+        redeem_reward_value,
+        status
+      )
+      VALUES (?, ?, ?, ?, ?, 'paid')
+      `,
+      [
+        parsedUserId,
+        parsedGiftVoucherId,
+        Number(voucherPrice.toFixed(2)),
+        String(voucherRows[0].discountCoupon ?? ''),
+        Number(voucherRows[0].redeemRewardValue ?? 0),
+      ]
+    ) as any
+
+    await conn.commit()
+
+    res.json({
+      ok: true,
+      message: 'Vale presente comprado com sucesso.',
+      purchase: {
+        id: Number(purchaseResult?.insertId ?? 0),
+        giftVoucherId: parsedGiftVoucherId,
+        name: String(voucherRows[0].name ?? ''),
+        paidAmount: Number(voucherPrice.toFixed(2)),
+        discountCoupon: String(voucherRows[0].discountCoupon ?? ''),
+        redeemRewardValue: Number(voucherRows[0].redeemRewardValue ?? 0),
+      },
+      balanceBefore: Number(currentBalance.toFixed(2)),
+      balanceAfter,
+    })
+  } catch (err) {
+    await conn.rollback()
+    console.error('[gift-vouchers-purchase]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao comprar vale presente.' })
+  } finally {
+    conn.release()
+  }
+})
 
 app.get('/api/admin/gift-codes', requireMaxAdmin, async (_req, res) => {
   try {
