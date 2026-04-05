@@ -4410,10 +4410,6 @@ app.post('/api/admin/gift-codes', requireMaxAdmin, async (req: AuthenticatedRequ
   }
 
   if (normalizedIsListedForSale) {
-    if (!normalizedProductName) {
-      res.status(400).json({ ok: false, error: 'Nome do produto é obrigatório para venda.' })
-      return
-    }
 
     if (!normalizedDescription) {
       res.status(400).json({ ok: false, error: 'Descrição é obrigatória para venda.' })
