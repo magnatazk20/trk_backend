@@ -3790,6 +3790,128 @@ app.post('/api/gift-codes/redeem', async (req, res) => {
         conn.release();
     }
 });
+app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
+    try {
+        await db_1.default.query(`
+      CREATE TABLE IF NOT EXISTS system_deposit_config (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        min_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        max_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        deposit_enabled TINYINT(1) NOT NULL DEFAULT 1,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+      `);
+        const [rows] = await db_1.default.query(`
+      SELECT
+        min_deposit_amount AS minDepositAmount,
+        max_deposit_amount AS maxDepositAmount,
+        deposit_enabled AS depositEnabled
+      FROM system_deposit_config
+      ORDER BY id ASC
+      LIMIT 1
+      `);
+        if (rows.length === 0) {
+            await db_1.default.query(`
+        INSERT INTO system_deposit_config
+          (min_deposit_amount, max_deposit_amount, deposit_enabled)
+        VALUES (0.00, 0.00, 1)
+        `);
+            res.json({
+                ok: true,
+                config: {
+                    minDepositAmount: 0,
+                    maxDepositAmount: 0,
+                    depositEnabled: true,
+                },
+            });
+            return;
+        }
+        const row = rows[0];
+        res.json({
+            ok: true,
+            config: {
+                minDepositAmount: Number(row.minDepositAmount ?? 0),
+                maxDepositAmount: Number(row.maxDepositAmount ?? 0),
+                depositEnabled: Number(row.depositEnabled ?? 1) === 1,
+            },
+        });
+    }
+    catch (err) {
+        console.error('[admin-deposit-config-get]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao carregar configurações de depósito.' });
+    }
+});
+app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
+    const { minDepositAmount, maxDepositAmount, depositEnabled } = req.body;
+    const min = Number(String(minDepositAmount ?? 0).replace(',', '.'));
+    const max = Number(String(maxDepositAmount ?? 0).replace(',', '.'));
+    const enabled = depositEnabled === true ||
+        depositEnabled === 1 ||
+        String(depositEnabled ?? '').toLowerCase() === 'true'
+        ? 1
+        : 0;
+    if (!Number.isFinite(min) || min < 0) {
+        res.status(400).json({ ok: false, error: 'Valor mínimo de depósito inválido.' });
+        return;
+    }
+    if (!Number.isFinite(max) || max < 0) {
+        res.status(400).json({ ok: false, error: 'Valor máximo de depósito inválido.' });
+        return;
+    }
+    if (max > 0 && min > max) {
+        res.status(400).json({ ok: false, error: 'Valor mínimo não pode ser maior que o máximo.' });
+        return;
+    }
+    try {
+        await db_1.default.query(`
+      CREATE TABLE IF NOT EXISTS system_deposit_config (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        min_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        max_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        deposit_enabled TINYINT(1) NOT NULL DEFAULT 1,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+      `);
+        const [rows] = await db_1.default.query('SELECT id FROM system_deposit_config ORDER BY id ASC LIMIT 1');
+        const normalizedMin = Number(min.toFixed(2));
+        const normalizedMax = Number(max.toFixed(2));
+        if (rows.length === 0) {
+            await db_1.default.query(`
+        INSERT INTO system_deposit_config
+          (min_deposit_amount, max_deposit_amount, deposit_enabled)
+        VALUES (?, ?, ?)
+        `, [normalizedMin, normalizedMax, enabled]);
+        }
+        else {
+            await db_1.default.query(`
+        UPDATE system_deposit_config
+        SET
+          min_deposit_amount = ?,
+          max_deposit_amount = ?,
+          deposit_enabled = ?,
+          updated_at = NOW()
+        WHERE id = ?
+        `, [normalizedMin, normalizedMax, enabled, Number(rows[0].id)]);
+        }
+        res.json({
+            ok: true,
+            message: 'Configurações de depósito salvas com sucesso.',
+            config: {
+                minDepositAmount: normalizedMin,
+                maxDepositAmount: normalizedMax,
+                depositEnabled: enabled === 1,
+            },
+        });
+    }
+    catch (err) {
+        console.error('[admin-deposit-config-save]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao salvar configurações de depósito.' });
+    }
+});
 app.get('/api/admin/withdraw-config', async (_req, res) => {
     try {
         await db_1.default.query(`
