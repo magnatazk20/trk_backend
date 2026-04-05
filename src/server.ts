@@ -3935,10 +3935,6 @@ const ensureGiftCodeTables = async () => {
     ADD COLUMN discount_percent DECIMAL(8,2) NULL
   `)
 
-  await tryAlter(`
-    ALTER TABLE gift_code_redemptions
-    MODIFY COLUMN metadata JSON NULL
-  `)
 }
 
 app.get('/api/gift-vouchers', requireAuth, async (_req, res) => {

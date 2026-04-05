@@ -9,9 +9,18 @@ const dotenv_1 = __importDefault(require("dotenv"));
 const bcrypt_1 = __importDefault(require("bcrypt"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const crypto_1 = __importDefault(require("crypto"));
+const http_1 = require("http");
+const socket_io_1 = require("socket.io");
 const db_1 = __importDefault(require("./db"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
+const httpServer = (0, http_1.createServer)(app);
+const io = new socket_io_1.Server(httpServer, {
+    cors: {
+        origin: '*',
+        methods: ['GET', 'POST'],
+    },
+});
 const PORT = process.env.PORT ?? 3333;
 const JWT_SECRET = process.env.JWT_SECRET ?? 'fallback_secret';
 const JWT_EXPIRES = process.env.JWT_EXPIRES_IN ?? '7d';
@@ -5399,8 +5408,15 @@ app.use((req, _res, next) => {
     });
     next();
 });
-app.listen(PORT, () => {
+io.on('connection', (socket) => {
+    console.log(`[ws] client connected: ${socket.id}`);
+    socket.on('disconnect', () => {
+        console.log(`[ws] client disconnected: ${socket.id}`);
+    });
+});
+httpServer.listen(PORT, () => {
     console.log(`✅ Server running on http://localhost:${PORT}`);
     console.log('📋 HTTP request logging: enabled');
     console.log('🧯 Global error logging: enabled');
+    console.log('🔌 WebSocket enabled');
 });
