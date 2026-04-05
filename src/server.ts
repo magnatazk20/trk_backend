@@ -4803,6 +4803,7 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         min_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
         max_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        deposit_enabled TINYINT(1) NOT NULL DEFAULT 1,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id)
@@ -4814,7 +4815,8 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
       `
       SELECT
         min_deposit_amount AS minDepositAmount,
-        max_deposit_amount AS maxDepositAmount
+        max_deposit_amount AS maxDepositAmount,
+        deposit_enabled AS depositEnabled
       FROM system_deposit_config
       ORDER BY id ASC
       LIMIT 1
@@ -4825,8 +4827,8 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
       await pool.query(
         `
         INSERT INTO system_deposit_config
-          (min_deposit_amount, max_deposit_amount)
-        VALUES (0.00, 0.00)
+          (min_deposit_amount, max_deposit_amount, deposit_enabled)
+        VALUES (0.00, 0.00, 1)
         `
       )
 
@@ -4835,6 +4837,7 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
         config: {
           minDepositAmount: 0,
           maxDepositAmount: 0,
+          depositEnabled: true,
         },
       })
       return
@@ -4846,6 +4849,7 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
       config: {
         minDepositAmount: Number(row.minDepositAmount ?? 0),
         maxDepositAmount: Number(row.maxDepositAmount ?? 0),
+        depositEnabled: Number(row.depositEnabled ?? 1) === 1,
       },
     })
   } catch (err) {
@@ -4855,13 +4859,20 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
 })
 
 app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
-  const { minDepositAmount, maxDepositAmount } = req.body as {
+  const { minDepositAmount, maxDepositAmount, depositEnabled } = req.body as {
     minDepositAmount?: number | string
     maxDepositAmount?: number | string
+    depositEnabled?: boolean | number | string
   }
 
   const min = Number(String(minDepositAmount ?? 0).replace(',', '.'))
   const max = Number(String(maxDepositAmount ?? 0).replace(',', '.'))
+  const enabled =
+    depositEnabled === true ||
+    depositEnabled === 1 ||
+    String(depositEnabled ?? '').toLowerCase() === 'true'
+      ? 1
+      : 0
 
   if (!Number.isFinite(min) || min < 0) {
     res.status(400).json({ ok: false, error: 'Valor mínimo de depósito inválido.' })
@@ -4885,6 +4896,7 @@ app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         min_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
         max_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        deposit_enabled TINYINT(1) NOT NULL DEFAULT 1,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id)
@@ -4903,10 +4915,10 @@ app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
       await pool.query(
         `
         INSERT INTO system_deposit_config
-          (min_deposit_amount, max_deposit_amount)
-        VALUES (?, ?)
+          (min_deposit_amount, max_deposit_amount, deposit_enabled)
+        VALUES (?, ?, ?)
         `,
-        [normalizedMin, normalizedMax]
+        [normalizedMin, normalizedMax, enabled]
       )
     } else {
       await pool.query(
@@ -4915,10 +4927,11 @@ app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
         SET
           min_deposit_amount = ?,
           max_deposit_amount = ?,
+          deposit_enabled = ?,
           updated_at = NOW()
         WHERE id = ?
         `,
-        [normalizedMin, normalizedMax, Number(rows[0].id)]
+        [normalizedMin, normalizedMax, enabled, Number(rows[0].id)]
       )
     }
 
@@ -4928,6 +4941,7 @@ app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
       config: {
         minDepositAmount: normalizedMin,
         maxDepositAmount: normalizedMax,
+        depositEnabled: enabled === 1,
       },
     })
   } catch (err) {
