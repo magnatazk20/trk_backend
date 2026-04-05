@@ -4795,6 +4795,147 @@ app.post('/api/gift-codes/redeem', async (req, res) => {
   }
 })
 
+app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
+  try {
+    await pool.query(
+      `
+      CREATE TABLE IF NOT EXISTS system_deposit_config (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        min_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        max_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+      `
+    )
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        min_deposit_amount AS minDepositAmount,
+        max_deposit_amount AS maxDepositAmount
+      FROM system_deposit_config
+      ORDER BY id ASC
+      LIMIT 1
+      `
+    )
+
+    if (rows.length === 0) {
+      await pool.query(
+        `
+        INSERT INTO system_deposit_config
+          (min_deposit_amount, max_deposit_amount)
+        VALUES (0.00, 0.00)
+        `
+      )
+
+      res.json({
+        ok: true,
+        config: {
+          minDepositAmount: 0,
+          maxDepositAmount: 0,
+        },
+      })
+      return
+    }
+
+    const row = rows[0]
+    res.json({
+      ok: true,
+      config: {
+        minDepositAmount: Number(row.minDepositAmount ?? 0),
+        maxDepositAmount: Number(row.maxDepositAmount ?? 0),
+      },
+    })
+  } catch (err) {
+    console.error('[admin-deposit-config-get]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar configurações de depósito.' })
+  }
+})
+
+app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
+  const { minDepositAmount, maxDepositAmount } = req.body as {
+    minDepositAmount?: number | string
+    maxDepositAmount?: number | string
+  }
+
+  const min = Number(String(minDepositAmount ?? 0).replace(',', '.'))
+  const max = Number(String(maxDepositAmount ?? 0).replace(',', '.'))
+
+  if (!Number.isFinite(min) || min < 0) {
+    res.status(400).json({ ok: false, error: 'Valor mínimo de depósito inválido.' })
+    return
+  }
+
+  if (!Number.isFinite(max) || max < 0) {
+    res.status(400).json({ ok: false, error: 'Valor máximo de depósito inválido.' })
+    return
+  }
+
+  if (max > 0 && min > max) {
+    res.status(400).json({ ok: false, error: 'Valor mínimo não pode ser maior que o máximo.' })
+    return
+  }
+
+  try {
+    await pool.query(
+      `
+      CREATE TABLE IF NOT EXISTS system_deposit_config (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        min_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        max_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+      `
+    )
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      'SELECT id FROM system_deposit_config ORDER BY id ASC LIMIT 1'
+    )
+
+    const normalizedMin = Number(min.toFixed(2))
+    const normalizedMax = Number(max.toFixed(2))
+
+    if (rows.length === 0) {
+      await pool.query(
+        `
+        INSERT INTO system_deposit_config
+          (min_deposit_amount, max_deposit_amount)
+        VALUES (?, ?)
+        `,
+        [normalizedMin, normalizedMax]
+      )
+    } else {
+      await pool.query(
+        `
+        UPDATE system_deposit_config
+        SET
+          min_deposit_amount = ?,
+          max_deposit_amount = ?,
+          updated_at = NOW()
+        WHERE id = ?
+        `,
+        [normalizedMin, normalizedMax, Number(rows[0].id)]
+      )
+    }
+
+    res.json({
+      ok: true,
+      message: 'Configurações de depósito salvas com sucesso.',
+      config: {
+        minDepositAmount: normalizedMin,
+        maxDepositAmount: normalizedMax,
+      },
+    })
+  } catch (err) {
+    console.error('[admin-deposit-config-save]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao salvar configurações de depósito.' })
+  }
+})
+
 app.get('/api/admin/withdraw-config', async (_req, res) => {
   try {
     await pool.query(
