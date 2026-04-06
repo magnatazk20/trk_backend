@@ -532,6 +532,26 @@ const processTelegramUpdates = async () => {
         [userId]
       )
 
+      const [confirmTelegramFlagRows] = await pool.query<RowDataPacket[]>(
+        `
+        SELECT telegram_conectado AS telegramConectado
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+        `,
+        [userId]
+      )
+
+      const telegramFlagPersisted = Number(confirmTelegramFlagRows[0]?.telegramConectado ?? 0) === 1
+      if (!telegramFlagPersisted) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.'
+        )
+        continue
+      }
+
       io.to(`user:${userId}`).emit('telegram:connected', {
         ok: true,
         userId,
