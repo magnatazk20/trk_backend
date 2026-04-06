@@ -506,7 +506,48 @@ const processTelegramUpdates = async () => {
       const phone = String(userRows[0].phone ?? '')
       const telegramConectado = Number(userRows[0].telegramConectado ?? 0)
 
-      if (telegramConectado === 1) {
+      const [existingByChatOrTelegramUserRows] = await pool.query<RowDataPacket[]>(
+        `
+        SELECT id
+        FROM user_telegram_connections
+        WHERE (telegram_chat_id = ? OR telegram_user_id = ?)
+          AND COALESCE(is_connected, 1) = 1
+        LIMIT 1
+        `,
+        [chatId, telegramUserId]
+      )
+
+      if (existingByChatOrTelegramUserRows.length > 0) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          'Esta conta já foi conectada anteriormente e não pode ser vinculada novamente.'
+        )
+        continue
+      }
+
+      const [existingByPhoneRows] = await pool.query<RowDataPacket[]>(
+        `
+        SELECT id
+        FROM user_telegram_connections
+        WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') = ?
+          AND COALESCE(is_connected, 1) = 1
+        LIMIT 1
+        `,
+        [normalizedIncomingPhone]
+      )
+
+      if (existingByPhoneRows.length > 0 || telegramConectado === 1) {
+        await pool.query(
+          `
+          UPDATE users
+          SET telegram_conectado = 1
+          WHERE id = ?
+             OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') = ?
+          `,
+          [userId, normalizedIncomingPhone]
+        )
+
         await sendTelegramMessage(
           botToken,
           chatId,
@@ -623,6 +664,7 @@ const processTelegramUpdates = async () => {
         }
 
         await conn.commit()
+        await ensureTelegramConnectedSync()
       } catch (txErr) {
         await conn.rollback()
         console.error('[telegram-link-transaction]', txErr)
