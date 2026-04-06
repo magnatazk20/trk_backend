@@ -1,0 +1,4 @@
+- [x] Adicionar função ensureCommissionLevelsTable no src/server.ts
+- [x] Integrar criação da tabela de comissões no fluxo de migração
+- [x] Validar build do backend
+- [ ] Commit e push das alterações

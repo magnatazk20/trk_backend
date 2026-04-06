@@ -3819,6 +3819,45 @@ const ensureGiftVoucherTables = async () => {
   `)
 }
 
+const ensureCommissionLevelsTable = async () => {
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS commission_levels (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      level TINYINT UNSIGNED NOT NULL,
+      name VARCHAR(60) NOT NULL,
+      commission_percent DECIMAL(8,2) NOT NULL DEFAULT 0.00,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_commission_levels_level (level),
+      KEY idx_commission_levels_active (is_active)
+    )
+    `
+  )
+
+  const [countRows] = await pool.query<RowDataPacket[]>(
+    `
+    SELECT COUNT(*) AS total
+    FROM commission_levels
+    `
+  )
+
+  const total = Number(countRows[0]?.total ?? 0)
+  if (total === 0) {
+    await pool.query(
+      `
+      INSERT INTO commission_levels (level, name, commission_percent, is_active)
+      VALUES
+        (1, 'Nível 1', 10.00, 1),
+        (2, 'Nível 2', 3.00, 1),
+        (3, 'Nível 3', 1.00, 1)
+      `
+    )
+  }
+}
+
 const ensureGiftCodeTables = async () => {
   await pool.query(
     `
@@ -6507,6 +6546,8 @@ app.post('/api/admin/migrate-balance-columns', async (_req, res) => {
       )
       `
     )
+
+    await ensureCommissionLevelsTable()
 
     res.json({
       ok: true,
