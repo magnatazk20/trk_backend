@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -11,7 +44,8 @@ const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const crypto_1 = __importDefault(require("crypto"));
 const http_1 = require("http");
 const socket_io_1 = require("socket.io");
-const db_1 = __importDefault(require("./db"));
+const db_1 = __importStar(require("./db"));
+const promise_1 = __importDefault(require("mysql2/promise"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const httpServer = (0, http_1.createServer)(app);
@@ -137,6 +171,22 @@ const resolveAuthUser = async (req) => {
         return null;
     }
 };
+const ensureDatabaseExists = async () => {
+    const conn = await promise_1.default.createConnection({
+        host: db_1.DB_HOST,
+        port: db_1.DB_PORT,
+        user: db_1.DB_USER,
+        password: db_1.DB_PASSWORD,
+        charset: 'utf8mb4',
+    });
+    try {
+        await conn.query(`CREATE DATABASE IF NOT EXISTS \`${db_1.DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+        console.log(`[db] database garantido: ${db_1.DB_NAME}@${db_1.DB_HOST}:${db_1.DB_PORT}`);
+    }
+    finally {
+        await conn.end();
+    }
+};
 const ensureTelegramConfigTable = async () => {
     await db_1.default.query(`
     CREATE TABLE IF NOT EXISTS system_telegram_config (
@@ -145,6 +195,7 @@ const ensureTelegramConfigTable = async () => {
       bot_token VARCHAR(255) NOT NULL DEFAULT '',
       group_id VARCHAR(255) NOT NULL DEFAULT '',
       welcome_message TEXT NULL,
+      private_chat_only_message TEXT NULL,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (id),
@@ -174,9 +225,23 @@ const ensureTelegramConfigTable = async () => {
     SET singleton_key = 1
     WHERE singleton_key IS NULL OR singleton_key <> 1
     `);
+    try {
+        await db_1.default.query(`
+      ALTER TABLE system_telegram_config
+      ADD COLUMN private_chat_only_message TEXT NULL
+      `);
+    }
+    catch {
+        // coluna já existe
+    }
     await db_1.default.query(`
-    INSERT IGNORE INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message)
-    VALUES (1, '', '', '')
+    INSERT IGNORE INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message, private_chat_only_message)
+    VALUES (1, '', '', '', 'Conexão permitida somente no chat privado do bot.')
+    `);
+    await db_1.default.query(`
+    UPDATE system_telegram_config
+    SET private_chat_only_message = 'Conexão permitida somente no chat privado do bot.'
+    WHERE private_chat_only_message IS NULL OR TRIM(private_chat_only_message) = ''
     `);
 };
 const ensureUserTelegramConnectionsTable = async () => {
@@ -224,7 +289,7 @@ const processTelegramUpdates = async () => {
         await ensureTelegramConfigTable();
         await ensureUserTelegramConnectionsTable();
         const [configRows] = await db_1.default.query(`
-      SELECT bot_token AS botToken, group_id AS groupId, welcome_message AS welcomeMessage
+      SELECT bot_token AS botToken, group_id AS groupId, welcome_message AS welcomeMessage, private_chat_only_message AS privateChatOnlyMessage
       FROM system_telegram_config
       WHERE TRIM(bot_token) <> ''
       ORDER BY id ASC
@@ -235,6 +300,8 @@ const processTelegramUpdates = async () => {
         const botToken = String(configRows[0].botToken ?? '').trim();
         const configuredGroupId = String(configRows[0].groupId ?? '').trim();
         const welcomeMessage = String(configRows[0].welcomeMessage ?? '').trim();
+        const privateChatOnlyMessage = String(configRows[0].privateChatOnlyMessage ?? '').trim() ||
+            'Conexão permitida somente no chat privado do bot.';
         if (!botToken)
             return;
         const updatesUrl = `https://api.telegram.org/bot${botToken}/getUpdates?timeout=25${telegramUpdateOffset > 0 ? `&offset=${telegramUpdateOffset}` : ''}`;
@@ -276,7 +343,7 @@ const processTelegramUpdates = async () => {
                 continue;
             }
             if (chatType !== 'private') {
-                await sendTelegramMessage(botToken, chatId, 'Conexão permitida somente no chat privado do bot.');
+                await sendTelegramMessage(botToken, chatId, privateChatOnlyMessage);
                 continue;
             }
             const isStartCommand = textLower === '/start' || textLower.startsWith('/start@');
@@ -448,8 +515,10 @@ const settleExpiredCyclesForUser = async (userId) => {
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
 const bootstrapDatabase = async () => {
+    await ensureDatabaseExists();
     await ensureTelegramConfigTable();
     await ensureUserTelegramConnectionsTable();
+    console.log('[bootstrap-database] telegram config e conexões garantidas');
 };
 bootstrapDatabase().catch((err) => {
     console.error('[bootstrap-database]', err);
@@ -4878,6 +4947,44 @@ app.get('/api/telegram/connection-status/:userId', requireAuth, async (req, res)
         res.status(500).json({ ok: false, error: 'Erro ao carregar status de conexão do Telegram.' });
     }
 });
+app.get('/api/admin/telegram-config/diagnostic', requireMaxAdmin, async (_req, res) => {
+    try {
+        await ensureDatabaseExists();
+        await ensureTelegramConfigTable();
+        const [tableRows] = await db_1.default.query(`
+      SELECT COUNT(*) AS total
+      FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'system_telegram_config'
+      `);
+        const [countRows] = await db_1.default.query(`
+      SELECT COUNT(*) AS total
+      FROM system_telegram_config
+      `);
+        res.json({
+            ok: true,
+            diagnostic: {
+                dbHost: db_1.DB_HOST,
+                dbPort: db_1.DB_PORT,
+                dbName: db_1.DB_NAME,
+                tableExists: Number(tableRows[0]?.total ?? 0) > 0,
+                rowsInSystemTelegramConfig: Number(countRows[0]?.total ?? 0),
+            },
+        });
+    }
+    catch (err) {
+        console.error('[admin-telegram-config-diagnostic]', err);
+        res.status(500).json({
+            ok: false,
+            error: 'Erro ao executar diagnóstico de configuração Telegram.',
+            diagnostic: {
+                dbHost: db_1.DB_HOST,
+                dbPort: db_1.DB_PORT,
+                dbName: db_1.DB_NAME,
+            },
+        });
+    }
+});
 app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
     try {
         await ensureTelegramConfigTable();
@@ -4886,6 +4993,7 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
         bot_token AS botToken,
         group_id AS groupId,
         welcome_message AS welcomeMessage,
+        private_chat_only_message AS privateChatOnlyMessage,
         updated_at AS updatedAt
       FROM system_telegram_config
       ORDER BY id ASC
@@ -4898,6 +5006,7 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
                     botToken: '',
                     groupId: '',
                     welcomeMessage: '',
+                    privateChatOnlyMessage: 'Conexão permitida somente no chat privado do bot.',
                     updatedAt: null,
                 },
             });
@@ -4909,6 +5018,8 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
                 botToken: String(rows[0].botToken ?? ''),
                 groupId: String(rows[0].groupId ?? ''),
                 welcomeMessage: String(rows[0].welcomeMessage ?? ''),
+                privateChatOnlyMessage: String(rows[0].privateChatOnlyMessage ?? '').trim() ||
+                    'Conexão permitida somente no chat privado do bot.',
                 updatedAt: rows[0].updatedAt ?? null,
             },
         });
@@ -4919,10 +5030,12 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
     }
 });
 app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
-    const { botToken, groupId, welcomeMessage } = req.body;
+    const { botToken, groupId, welcomeMessage, privateChatOnlyMessage } = req.body;
     const parsedBotToken = String(botToken ?? '').trim();
     const parsedGroupId = String(groupId ?? '').trim();
     const parsedWelcomeMessage = String(welcomeMessage ?? '').trim();
+    const parsedPrivateChatOnlyMessage = String(privateChatOnlyMessage ?? '').trim() ||
+        'Conexão permitida somente no chat privado do bot.';
     if (!parsedBotToken) {
         res.status(400).json({ ok: false, error: 'Bot token é obrigatório.' });
         return;
@@ -4934,14 +5047,15 @@ app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
     try {
         await ensureTelegramConfigTable();
         await db_1.default.query(`
-      INSERT INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message)
-      VALUES (1, ?, ?, ?)
+      INSERT INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message, private_chat_only_message)
+      VALUES (1, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         bot_token = VALUES(bot_token),
         group_id = VALUES(group_id),
         welcome_message = VALUES(welcome_message),
+        private_chat_only_message = VALUES(private_chat_only_message),
         updated_at = NOW()
-      `, [parsedBotToken, parsedGroupId, parsedWelcomeMessage]);
+      `, [parsedBotToken, parsedGroupId, parsedWelcomeMessage, parsedPrivateChatOnlyMessage]);
         res.json({
             ok: true,
             message: 'Configuração do Telegram salva com sucesso.',
@@ -4949,6 +5063,7 @@ app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
                 botToken: parsedBotToken,
                 groupId: parsedGroupId,
                 welcomeMessage: parsedWelcomeMessage,
+                privateChatOnlyMessage: parsedPrivateChatOnlyMessage,
             },
         });
     }
@@ -5830,6 +5945,7 @@ app.post('/api/admin/migrate-balance-columns', async (_req, res) => {
         bot_token VARCHAR(255) NOT NULL DEFAULT '',
         group_id VARCHAR(255) NOT NULL DEFAULT '',
         welcome_message TEXT NULL,
+        private_chat_only_message TEXT NULL,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
@@ -5837,8 +5953,8 @@ app.post('/api/admin/migrate-balance-columns', async (_req, res) => {
       )
       `);
         await db_1.default.query(`
-      INSERT IGNORE INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message)
-      VALUES (1, '', '', '')
+      INSERT IGNORE INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message, private_chat_only_message)
+      VALUES (1, '', '', '', 'Conexão permitida somente no chat privado do bot.')
       `);
         const [vipCountRows] = await db_1.default.query('SELECT COUNT(*) AS total FROM vip_levels');
         const totalVips = Number(vipCountRows[0]?.total ?? 0);
