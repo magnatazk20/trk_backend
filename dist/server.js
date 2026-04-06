@@ -3017,6 +3017,36 @@ const ensureGiftVoucherTables = async () => {
     ADD COLUMN generated_gift_code_id BIGINT UNSIGNED NULL
   `);
 };
+const ensureCommissionLevelsTable = async () => {
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS commission_levels (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      level TINYINT UNSIGNED NOT NULL,
+      name VARCHAR(60) NOT NULL,
+      commission_percent DECIMAL(8,2) NOT NULL DEFAULT 0.00,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_commission_levels_level (level),
+      KEY idx_commission_levels_active (is_active)
+    )
+    `);
+    const [countRows] = await db_1.default.query(`
+    SELECT COUNT(*) AS total
+    FROM commission_levels
+    `);
+    const total = Number(countRows[0]?.total ?? 0);
+    if (total === 0) {
+        await db_1.default.query(`
+      INSERT INTO commission_levels (level, name, commission_percent, is_active)
+      VALUES
+        (1, 'Nível 1', 10.00, 1),
+        (2, 'Nível 2', 3.00, 1),
+        (3, 'Nível 3', 1.00, 1)
+      `);
+    }
+};
 const ensureGiftCodeTables = async () => {
     await db_1.default.query(`
     CREATE TABLE IF NOT EXISTS gift_codes (
@@ -3798,11 +3828,68 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
         min_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
         max_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
         deposit_enabled TINYINT(1) NOT NULL DEFAULT 1,
+        quick_preset_values VARCHAR(255) NOT NULL DEFAULT '20,50,100,200,500',
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id)
       )
       `);
+        await db_1.default.query(`
+      CREATE TABLE IF NOT EXISTS system_deposit_quick_presets (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        preset_order INT NOT NULL DEFAULT 0,
+        value DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_system_deposit_quick_presets_order (preset_order),
+        KEY idx_system_deposit_quick_presets_active (is_active)
+      )
+      `);
+        try {
+            await db_1.default.query(`
+        ALTER TABLE system_deposit_config
+        ADD COLUMN quick_preset_values VARCHAR(255) NOT NULL DEFAULT '20,50,100,200,500'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        await db_1.default.query(`
+      UPDATE system_deposit_config
+      SET quick_preset_values = '20,50,100,200,500'
+      WHERE quick_preset_values IS NULL OR TRIM(quick_preset_values) = ''
+      `);
+        const [legacyConfigRows] = await db_1.default.query(`
+      SELECT quick_preset_values AS quickPresetValues
+      FROM system_deposit_config
+      ORDER BY id ASC
+      LIMIT 1
+      `);
+        const [presetCountRows] = await db_1.default.query(`
+      SELECT COUNT(*) AS total
+      FROM system_deposit_quick_presets
+      WHERE is_active = 1
+      `);
+        const activePresetCount = Number(presetCountRows[0]?.total ?? 0);
+        if (activePresetCount === 0) {
+            const legacyValuesRaw = String(legacyConfigRows[0]?.quickPresetValues ?? '20,50,100,200,500');
+            const values = legacyValuesRaw
+                .split(',')
+                .map((item) => Number(String(item).trim().replace(',', '.')))
+                .filter((value) => Number.isFinite(value) && value > 0)
+                .map((value) => Number(value.toFixed(2)));
+            const presetsToInsert = values.length > 0 ? values : [20, 50, 100, 200, 500];
+            await db_1.default.query('DELETE FROM system_deposit_quick_presets');
+            for (let i = 0; i < presetsToInsert.length; i += 1) {
+                await db_1.default.query(`
+          INSERT INTO system_deposit_quick_presets
+            (preset_order, value, is_active)
+          VALUES (?, ?, 1)
+          `, [i + 1, Number(presetsToInsert[i].toFixed(2))]);
+            }
+        }
         const [rows] = await db_1.default.query(`
       SELECT
         min_deposit_amount AS minDepositAmount,
@@ -3815,19 +3902,40 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
         if (rows.length === 0) {
             await db_1.default.query(`
         INSERT INTO system_deposit_config
-          (min_deposit_amount, max_deposit_amount, deposit_enabled)
-        VALUES (0.00, 0.00, 1)
+          (min_deposit_amount, max_deposit_amount, deposit_enabled, quick_preset_values)
+        VALUES (0.00, 0.00, 1, '20,50,100,200,500')
         `);
+            const [presetRowsOnEmpty] = await db_1.default.query(`
+        SELECT value
+        FROM system_deposit_quick_presets
+        WHERE is_active = 1
+        ORDER BY preset_order ASC, id ASC
+        `);
+            const presetValuesOnEmpty = presetRowsOnEmpty
+                .map((row) => Number(row.value ?? 0))
+                .filter((value) => Number.isFinite(value) && value > 0)
+                .map((value) => Number(value.toFixed(2)));
             res.json({
                 ok: true,
                 config: {
                     minDepositAmount: 0,
                     maxDepositAmount: 0,
                     depositEnabled: true,
+                    quickPresetValues: presetValuesOnEmpty.length > 0 ? presetValuesOnEmpty : [20, 50, 100, 200, 500],
                 },
             });
             return;
         }
+        const [presetRows] = await db_1.default.query(`
+      SELECT value
+      FROM system_deposit_quick_presets
+      WHERE is_active = 1
+      ORDER BY preset_order ASC, id ASC
+      `);
+        const quickPresetValues = presetRows
+            .map((row) => Number(row.value ?? 0))
+            .filter((value) => Number.isFinite(value) && value > 0)
+            .map((value) => Number(value.toFixed(2)));
         const row = rows[0];
         res.json({
             ok: true,
@@ -3835,6 +3943,7 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
                 minDepositAmount: Number(row.minDepositAmount ?? 0),
                 maxDepositAmount: Number(row.maxDepositAmount ?? 0),
                 depositEnabled: Number(row.depositEnabled ?? 1) === 1,
+                quickPresetValues: quickPresetValues.length > 0 ? quickPresetValues : [20, 50, 100, 200, 500],
             },
         });
     }
@@ -3844,7 +3953,7 @@ app.get('/api/admin/deposit-config', requireMaxAdmin, async (_req, res) => {
     }
 });
 app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
-    const { minDepositAmount, maxDepositAmount, depositEnabled } = req.body;
+    const { minDepositAmount, maxDepositAmount, depositEnabled, quickPresetValues } = req.body;
     const min = Number(String(minDepositAmount ?? 0).replace(',', '.'));
     const max = Number(String(maxDepositAmount ?? 0).replace(',', '.'));
     const enabled = depositEnabled === true ||
@@ -3864,6 +3973,20 @@ app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
         res.status(400).json({ ok: false, error: 'Valor mínimo não pode ser maior que o máximo.' });
         return;
     }
+    const parsedQuickPresetValues = Array.isArray(quickPresetValues)
+        ? quickPresetValues
+        : String(quickPresetValues ?? '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean);
+    const normalizedQuickPresetValues = parsedQuickPresetValues
+        .map((item) => Number(String(item).replace(',', '.')))
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .map((value) => Number(value.toFixed(2)));
+    if (normalizedQuickPresetValues.length === 0) {
+        res.status(400).json({ ok: false, error: 'Informe ao menos um valor pré-selecionado válido.' });
+        return;
+    }
     try {
         await db_1.default.query(`
       CREATE TABLE IF NOT EXISTS system_deposit_config (
@@ -3871,20 +3994,44 @@ app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
         min_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
         max_deposit_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
         deposit_enabled TINYINT(1) NOT NULL DEFAULT 1,
+        quick_preset_values VARCHAR(255) NOT NULL DEFAULT '20,50,100,200,500',
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id)
       )
       `);
+        await db_1.default.query(`
+      CREATE TABLE IF NOT EXISTS system_deposit_quick_presets (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        preset_order INT NOT NULL DEFAULT 0,
+        value DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_system_deposit_quick_presets_order (preset_order),
+        KEY idx_system_deposit_quick_presets_active (is_active)
+      )
+      `);
+        try {
+            await db_1.default.query(`
+        ALTER TABLE system_deposit_config
+        ADD COLUMN quick_preset_values VARCHAR(255) NOT NULL DEFAULT '20,50,100,200,500'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
         const [rows] = await db_1.default.query('SELECT id FROM system_deposit_config ORDER BY id ASC LIMIT 1');
         const normalizedMin = Number(min.toFixed(2));
         const normalizedMax = Number(max.toFixed(2));
+        const quickPresetValuesString = normalizedQuickPresetValues.join(',');
         if (rows.length === 0) {
             await db_1.default.query(`
         INSERT INTO system_deposit_config
-          (min_deposit_amount, max_deposit_amount, deposit_enabled)
-        VALUES (?, ?, ?)
-        `, [normalizedMin, normalizedMax, enabled]);
+          (min_deposit_amount, max_deposit_amount, deposit_enabled, quick_preset_values)
+        VALUES (?, ?, ?, ?)
+        `, [normalizedMin, normalizedMax, enabled, quickPresetValuesString]);
         }
         else {
             await db_1.default.query(`
@@ -3893,9 +4040,18 @@ app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
           min_deposit_amount = ?,
           max_deposit_amount = ?,
           deposit_enabled = ?,
+          quick_preset_values = ?,
           updated_at = NOW()
         WHERE id = ?
-        `, [normalizedMin, normalizedMax, enabled, Number(rows[0].id)]);
+        `, [normalizedMin, normalizedMax, enabled, quickPresetValuesString, Number(rows[0].id)]);
+        }
+        await db_1.default.query('DELETE FROM system_deposit_quick_presets');
+        for (let i = 0; i < normalizedQuickPresetValues.length; i += 1) {
+            await db_1.default.query(`
+        INSERT INTO system_deposit_quick_presets
+          (preset_order, value, is_active)
+        VALUES (?, ?, 1)
+        `, [i + 1, Number(normalizedQuickPresetValues[i].toFixed(2))]);
         }
         res.json({
             ok: true,
@@ -3904,6 +4060,7 @@ app.post('/api/admin/deposit-config', requireMaxAdmin, async (req, res) => {
                 minDepositAmount: normalizedMin,
                 maxDepositAmount: normalizedMax,
                 depositEnabled: enabled === 1,
+                quickPresetValues: normalizedQuickPresetValues,
             },
         });
     }
@@ -5041,6 +5198,7 @@ app.post('/api/admin/migrate-balance-columns', async (_req, res) => {
         KEY idx_daily_checkins_day (checkin_day)
       )
       `);
+        await ensureCommissionLevelsTable();
         res.json({
             ok: true,
             message: 'Migração aplicada: saldo, pagamentos, tarefas de mineração, níveis VIP, roleta e check-in garantidos.',
