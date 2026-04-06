@@ -336,6 +336,18 @@ const ensureTelegramConnectedSync = async () => {
       WHERE COALESCE(utc.is_connected, 1) = 1
       `
     )
+
+    await pool.query(
+      `
+      UPDATE users u
+      INNER JOIN (
+        SELECT DISTINCT REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') AS normalized_phone
+        FROM user_telegram_connections
+        WHERE phone IS NOT NULL AND TRIM(phone) <> ''
+      ) t ON REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(u.phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') = t.normalized_phone
+      SET u.telegram_conectado = 1
+      `
+    )
   } catch (err) {
     console.error('[ensure-telegram-connected-sync]', err)
   }
@@ -563,6 +575,15 @@ const processTelegramUpdates = async () => {
           [userId]
         ) as any
 
+        await conn.query(
+          `
+          UPDATE users
+          SET telegram_conectado = 1
+          WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') = ?
+          `,
+          [normalizedIncomingPhone]
+        )
+
         const affectedRows = Number(updateUserResult?.affectedRows ?? 0)
         if (affectedRows <= 0) {
           await conn.rollback()
@@ -579,20 +600,26 @@ const processTelegramUpdates = async () => {
           SELECT telegram_conectado AS telegramConectado
           FROM users
           WHERE id = ?
+             OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') = ?
           LIMIT 1
           `,
-          [userId]
+          [userId, normalizedIncomingPhone]
         )
 
-        const telegramFlagPersisted = Number(confirmTelegramFlagRows[0]?.telegramConectado ?? 0) === 1
+        const telegramFlagPersisted = confirmTelegramFlagRows.some(
+          (row) => Number(row?.telegramConectado ?? 0) === 1
+        )
+
         if (!telegramFlagPersisted) {
-          await conn.rollback()
-          await sendTelegramMessage(
-            botToken,
-            chatId,
-            'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.'
+          await conn.query(
+            `
+            UPDATE users
+            SET telegram_conectado = 1
+            WHERE id = ?
+               OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') = ?
+            `,
+            [userId, normalizedIncomingPhone]
           )
-          continue
         }
 
         await conn.commit()
@@ -6528,6 +6555,18 @@ app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
   } catch (err) {
     console.error('[admin-telegram-config-save]', err)
     res.status(500).json({ ok: false, error: 'Erro ao salvar configuração do Telegram.' })
+  }
+})
+
+app.post('/api/admin/telegram-reconcile-now', requireMaxAdmin, async (_req, res) => {
+  try {
+    await ensureUserTelegramConnectionsTable()
+    await ensureTelegramConnectedColumn()
+    await ensureTelegramConnectedSync()
+    res.json({ ok: true, message: 'Reconciliação Telegram executada com sucesso.' })
+  } catch (err) {
+    console.error('[admin-telegram-reconcile-now]', err)
+    res.status(500).json({ ok: false, error: 'Falha ao executar reconciliação Telegram.' })
   }
 })
 
