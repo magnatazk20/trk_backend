@@ -227,7 +227,7 @@ const processTelegramUpdates = async () => {
 
     const [configRows] = await pool.query<RowDataPacket[]>(
       `
-      SELECT bot_token AS botToken
+      SELECT bot_token AS botToken, group_id AS groupId
       FROM system_telegram_config
       WHERE TRIM(bot_token) <> ''
       ORDER BY id ASC
@@ -238,6 +238,7 @@ const processTelegramUpdates = async () => {
     if (configRows.length === 0) return
 
     const botToken = String(configRows[0].botToken ?? '').trim()
+    const configuredGroupId = String(configRows[0].groupId ?? '').trim()
     if (!botToken) return
 
     const updatesUrl = `https://api.telegram.org/bot${botToken}/getUpdates?timeout=25${telegramUpdateOffset > 0 ? `&offset=${telegramUpdateOffset}` : ''}`
@@ -256,11 +257,25 @@ const processTelegramUpdates = async () => {
       if (!message) continue
 
       const chatId = String(message?.chat?.id ?? '').trim()
+      const chatType = String(message?.chat?.type ?? '').trim().toLowerCase()
       const telegramUserId = String(message?.from?.id ?? '').trim()
       const telegramUsername = String(message?.from?.username ?? '').trim() || null
       const telegramFirstName = String(message?.from?.first_name ?? '').trim() || null
       const textRaw = String(message?.text ?? '').trim()
       if (!chatId || !telegramUserId || !textRaw) continue
+
+      if (configuredGroupId && chatId === configuredGroupId) {
+        continue
+      }
+
+      if (chatType !== 'private') {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          'Conexão permitida somente no chat privado do bot.'
+        )
+        continue
+      }
 
       const normalizedIncomingPhone = normalizePhoneForCompare(textRaw)
       if (!normalizedIncomingPhone) {
@@ -293,6 +308,28 @@ const processTelegramUpdates = async () => {
 
       const userId = Number(userRows[0].id)
       const phone = String(userRows[0].phone ?? '')
+
+      const [existingByUserRows] = await pool.query<RowDataPacket[]>(
+        `
+        SELECT telegram_chat_id AS telegramChatId
+        FROM user_telegram_connections
+        WHERE user_id = ?
+        LIMIT 1
+        `,
+        [userId]
+      )
+
+      if (existingByUserRows.length > 0) {
+        const existingChatId = String(existingByUserRows[0].telegramChatId ?? '').trim()
+        if (existingChatId && existingChatId !== chatId) {
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            'Esta conta já está conectada em outro Telegram e não pode ser vinculada novamente.'
+          )
+          continue
+        }
+      }
 
       await pool.query(
         `

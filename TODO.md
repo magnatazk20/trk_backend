@@ -1,5 +1,5 @@
-- [x] Criar infraestrutura de conexão Telegram no backend (schema + polling + vínculo por telefone).
-- [x] Integrar emissão websocket em tempo real quando conta Telegram for conectada.
-- [x] Adicionar endpoint de status de conexão Telegram por usuário.
-- [x] Executar build e validar funcionamento básico.
+- [ ] Restringir vínculo Telegram apenas ao chat privado (bloquear grupos).
+- [ ] Impedir reconexão de conta já vinculada por outro Telegram/chat.
+- [ ] Garantir mensagem de sucesso clara ao conectar conta no privado.
+- [ ] Executar build e validar funcionamento básico.
 - [ ] Commitar e dar push das alterações.
