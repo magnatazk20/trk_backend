@@ -31,6 +31,7 @@ const SAO_PAULO_TZ = 'America/Sao_Paulo';
 let telegramPollingStarted = false;
 let telegramPollingInterval = null;
 let telegramUpdateOffset = 0;
+const telegramProcessedMessageKeys = new Set();
 const getSaoPauloDateString = () => new Intl.DateTimeFormat('en-CA', {
     timeZone: SAO_PAULO_TZ,
     year: 'numeric',
@@ -140,12 +141,42 @@ const ensureTelegramConfigTable = async () => {
     await db_1.default.query(`
     CREATE TABLE IF NOT EXISTS system_telegram_config (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      singleton_key TINYINT UNSIGNED NOT NULL DEFAULT 1,
       bot_token VARCHAR(255) NOT NULL DEFAULT '',
       group_id VARCHAR(255) NOT NULL DEFAULT '',
+      welcome_message TEXT NULL,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (id)
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_system_telegram_config_singleton (singleton_key)
     )
+    `);
+    try {
+        await db_1.default.query(`
+      ALTER TABLE system_telegram_config
+      ADD COLUMN singleton_key TINYINT UNSIGNED NOT NULL DEFAULT 1
+      `);
+    }
+    catch {
+        // coluna já existe
+    }
+    try {
+        await db_1.default.query(`
+      ALTER TABLE system_telegram_config
+      ADD UNIQUE KEY uq_system_telegram_config_singleton (singleton_key)
+      `);
+    }
+    catch {
+        // índice já existe
+    }
+    await db_1.default.query(`
+    UPDATE system_telegram_config
+    SET singleton_key = 1
+    WHERE singleton_key IS NULL OR singleton_key <> 1
+    `);
+    await db_1.default.query(`
+    INSERT IGNORE INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message)
+    VALUES (1, '', '', '')
     `);
 };
 const ensureUserTelegramConnectionsTable = async () => {
@@ -193,7 +224,7 @@ const processTelegramUpdates = async () => {
         await ensureTelegramConfigTable();
         await ensureUserTelegramConnectionsTable();
         const [configRows] = await db_1.default.query(`
-      SELECT bot_token AS botToken
+      SELECT bot_token AS botToken, group_id AS groupId, welcome_message AS welcomeMessage
       FROM system_telegram_config
       WHERE TRIM(bot_token) <> ''
       ORDER BY id ASC
@@ -202,6 +233,8 @@ const processTelegramUpdates = async () => {
         if (configRows.length === 0)
             return;
         const botToken = String(configRows[0].botToken ?? '').trim();
+        const configuredGroupId = String(configRows[0].groupId ?? '').trim();
+        const welcomeMessage = String(configRows[0].welcomeMessage ?? '').trim();
         if (!botToken)
             return;
         const updatesUrl = `https://api.telegram.org/bot${botToken}/getUpdates?timeout=25${telegramUpdateOffset > 0 ? `&offset=${telegramUpdateOffset}` : ''}`;
@@ -218,15 +251,47 @@ const processTelegramUpdates = async () => {
             if (!message)
                 continue;
             const chatId = String(message?.chat?.id ?? '').trim();
+            const chatType = String(message?.chat?.type ?? '').trim().toLowerCase();
+            const messageId = Number(message?.message_id ?? 0);
             const telegramUserId = String(message?.from?.id ?? '').trim();
             const telegramUsername = String(message?.from?.username ?? '').trim() || null;
             const telegramFirstName = String(message?.from?.first_name ?? '').trim() || null;
             const textRaw = String(message?.text ?? '').trim();
             if (!chatId || !telegramUserId || !textRaw)
                 continue;
+            const textLower = textRaw.toLowerCase();
+            if (messageId > 0) {
+                const messageKey = `${chatId}:${messageId}`;
+                if (telegramProcessedMessageKeys.has(messageKey)) {
+                    continue;
+                }
+                telegramProcessedMessageKeys.add(messageKey);
+                if (telegramProcessedMessageKeys.size > 2000) {
+                    const firstKey = telegramProcessedMessageKeys.values().next().value;
+                    if (firstKey)
+                        telegramProcessedMessageKeys.delete(firstKey);
+                }
+            }
+            if (configuredGroupId && chatId === configuredGroupId) {
+                continue;
+            }
+            if (chatType !== 'private') {
+                await sendTelegramMessage(botToken, chatId, 'Conexão permitida somente no chat privado do bot.');
+                continue;
+            }
+            const isStartCommand = textLower === '/start' || textLower.startsWith('/start@');
+            if (isStartCommand) {
+                if (welcomeMessage) {
+                    await sendTelegramMessage(botToken, chatId, welcomeMessage);
+                }
+                else {
+                    await sendTelegramMessage(botToken, chatId, 'Mensagem de boas-vindas não configurada. Peça ao administrador para configurar em /adf/telegram-config.');
+                }
+                continue;
+            }
             const normalizedIncomingPhone = normalizePhoneForCompare(textRaw);
             if (!normalizedIncomingPhone) {
-                await sendTelegramMessage(botToken, chatId, 'Envie o telefone cadastrado na plataforma para conectar sua conta.');
+                await sendTelegramMessage(botToken, chatId, 'Para conectar sua conta, envie APENAS o telefone cadastrado na plataforma (somente no privado do bot). Exemplo: 11999998888');
                 continue;
             }
             const [userRows] = await db_1.default.query(`
@@ -241,6 +306,19 @@ const processTelegramUpdates = async () => {
             }
             const userId = Number(userRows[0].id);
             const phone = String(userRows[0].phone ?? '');
+            const [existingByUserRows] = await db_1.default.query(`
+        SELECT telegram_chat_id AS telegramChatId
+        FROM user_telegram_connections
+        WHERE user_id = ?
+        LIMIT 1
+        `, [userId]);
+            if (existingByUserRows.length > 0) {
+                const existingChatId = String(existingByUserRows[0].telegramChatId ?? '').trim();
+                if (existingChatId && existingChatId !== chatId) {
+                    await sendTelegramMessage(botToken, chatId, 'Esta conta já está conectada em outro Telegram e não pode ser vinculada novamente.');
+                    continue;
+                }
+            }
             await db_1.default.query(`
         INSERT INTO user_telegram_connections
         (
@@ -4807,6 +4885,7 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
       SELECT
         bot_token AS botToken,
         group_id AS groupId,
+        welcome_message AS welcomeMessage,
         updated_at AS updatedAt
       FROM system_telegram_config
       ORDER BY id ASC
@@ -4818,6 +4897,7 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
                 config: {
                     botToken: '',
                     groupId: '',
+                    welcomeMessage: '',
                     updatedAt: null,
                 },
             });
@@ -4828,6 +4908,7 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
             config: {
                 botToken: String(rows[0].botToken ?? ''),
                 groupId: String(rows[0].groupId ?? ''),
+                welcomeMessage: String(rows[0].welcomeMessage ?? ''),
                 updatedAt: rows[0].updatedAt ?? null,
             },
         });
@@ -4838,9 +4919,10 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
     }
 });
 app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
-    const { botToken, groupId } = req.body;
+    const { botToken, groupId, welcomeMessage } = req.body;
     const parsedBotToken = String(botToken ?? '').trim();
     const parsedGroupId = String(groupId ?? '').trim();
+    const parsedWelcomeMessage = String(welcomeMessage ?? '').trim();
     if (!parsedBotToken) {
         res.status(400).json({ ok: false, error: 'Bot token é obrigatório.' });
         return;
@@ -4851,29 +4933,22 @@ app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
     }
     try {
         await ensureTelegramConfigTable();
-        const [rows] = await db_1.default.query('SELECT id FROM system_telegram_config ORDER BY id ASC LIMIT 1');
-        if (rows.length === 0) {
-            await db_1.default.query(`
-        INSERT INTO system_telegram_config (bot_token, group_id)
-        VALUES (?, ?)
-        `, [parsedBotToken, parsedGroupId]);
-        }
-        else {
-            await db_1.default.query(`
-        UPDATE system_telegram_config
-        SET
-          bot_token = ?,
-          group_id = ?,
-          updated_at = NOW()
-        WHERE id = ?
-        `, [parsedBotToken, parsedGroupId, Number(rows[0].id)]);
-        }
+        await db_1.default.query(`
+      INSERT INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message)
+      VALUES (1, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        bot_token = VALUES(bot_token),
+        group_id = VALUES(group_id),
+        welcome_message = VALUES(welcome_message),
+        updated_at = NOW()
+      `, [parsedBotToken, parsedGroupId, parsedWelcomeMessage]);
         res.json({
             ok: true,
             message: 'Configuração do Telegram salva com sucesso.',
             config: {
                 botToken: parsedBotToken,
                 groupId: parsedGroupId,
+                welcomeMessage: parsedWelcomeMessage,
             },
         });
     }
@@ -5747,6 +5822,23 @@ app.post('/api/admin/migrate-balance-columns', async (_req, res) => {
         KEY idx_vip_purchase_user_id (user_id),
         KEY idx_vip_purchase_level_id (vip_level_id)
       )
+      `);
+        await db_1.default.query(`
+      CREATE TABLE IF NOT EXISTS system_telegram_config (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        singleton_key TINYINT UNSIGNED NOT NULL DEFAULT 1,
+        bot_token VARCHAR(255) NOT NULL DEFAULT '',
+        group_id VARCHAR(255) NOT NULL DEFAULT '',
+        welcome_message TEXT NULL,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_system_telegram_config_singleton (singleton_key)
+      )
+      `);
+        await db_1.default.query(`
+      INSERT IGNORE INTO system_telegram_config (singleton_key, bot_token, group_id, welcome_message)
+      VALUES (1, '', '', '')
       `);
         const [vipCountRows] = await db_1.default.query('SELECT COUNT(*) AS total FROM vip_levels');
         const totalVips = Number(vipCountRows[0]?.total ?? 0);
