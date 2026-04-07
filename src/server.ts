@@ -418,7 +418,15 @@ const ensureTelegramConnectedSync = async () => {
 
 const normalizePhoneForCompare = (value: string) => String(value ?? '').replace(/\D/g, '')
 
-const sendTelegramMessage = async (botToken: string, chatId: string, text: string) => {
+const sendTelegramMessage = async (
+  botToken: string,
+  chatId: string,
+  text: string,
+  options?: {
+    replyMarkup?: Record<string, unknown>
+    parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML'
+  }
+) => {
   if (!botToken || !chatId) return
   try {
     await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
@@ -429,6 +437,8 @@ const sendTelegramMessage = async (botToken: string, chatId: string, text: strin
       body: JSON.stringify({
         chat_id: chatId,
         text,
+        ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
+        ...(options?.parseMode ? { parse_mode: options.parseMode } : {}),
       }),
     })
   } catch (err) {
@@ -774,10 +784,22 @@ const processTelegramUpdates = async () => {
         )
 
         if (connectionRows.length === 0) {
+          const usernameValue = telegramUsername ? `@${telegramUsername}` : '@usuário'
+          const botUsername = String((updatesData as any)?.result?.[0]?.message?.via_bot?.username ?? '').trim()
+          const botButtonLabel = botUsername ? `@${botUsername}` : 'Abrir bot'
+          const botUrl = botUsername ? `https://t.me/${botUsername}` : undefined
+
           await sendTelegramMessage(
             botToken,
             chatId,
-            'Conta não vinculada. Primeiro envie seu telefone no chat privado do bot para conectar.'
+            `⚠️ Lembrete ${usernameValue} Você ainda não vinculou sua conta PGLM e não pode receber recompensas de check-in! Clique no botão abaixo para vincular`,
+            botUrl
+              ? {
+                  replyMarkup: {
+                    inline_keyboard: [[{ text: botButtonLabel, url: botUrl }]],
+                  },
+                }
+              : undefined
           )
           continue
         }

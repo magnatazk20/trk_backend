@@ -375,7 +375,7 @@ const ensureTelegramConnectedSync = async () => {
     }
 };
 const normalizePhoneForCompare = (value) => String(value ?? '').replace(/\D/g, '');
-const sendTelegramMessage = async (botToken, chatId, text) => {
+const sendTelegramMessage = async (botToken, chatId, text, options) => {
     if (!botToken || !chatId)
         return;
     try {
@@ -387,6 +387,8 @@ const sendTelegramMessage = async (botToken, chatId, text) => {
             body: JSON.stringify({
                 chat_id: chatId,
                 text,
+                ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
+                ...(options?.parseMode ? { parse_mode: options.parseMode } : {}),
             }),
         });
     }
@@ -659,7 +661,17 @@ const processTelegramUpdates = async () => {
           LIMIT 1
           `, [telegramUserId]);
                 if (connectionRows.length === 0) {
-                    await sendTelegramMessage(botToken, chatId, 'Conta não vinculada. Primeiro envie seu telefone no chat privado do bot para conectar.');
+                    const usernameValue = telegramUsername ? `@${telegramUsername}` : '@usuário';
+                    const botUsername = String(updatesData?.result?.[0]?.message?.via_bot?.username ?? '').trim();
+                    const botButtonLabel = botUsername ? `@${botUsername}` : 'Abrir bot';
+                    const botUrl = botUsername ? `https://t.me/${botUsername}` : undefined;
+                    await sendTelegramMessage(botToken, chatId, `⚠️ Lembrete ${usernameValue} Você ainda não vinculou sua conta PGLM e não pode receber recompensas de check-in! Clique no botão abaixo para vincular`, botUrl
+                        ? {
+                            replyMarkup: {
+                                inline_keyboard: [[{ text: botButtonLabel, url: botUrl }]],
+                            },
+                        }
+                        : undefined);
                     continue;
                 }
                 const linkedUserId = Number(connectionRows[0].userId ?? 0);
