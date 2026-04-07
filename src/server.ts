@@ -638,9 +638,9 @@ const processTelegramUpdates = async () => {
       if (!chatIdSanitized || !telegramUserId) continue
 
       const isGroupMessage = chatType === 'group' || chatType === 'supergroup'
+      const hasConfiguredGroup = Boolean(configuredGroupIdSanitized)
       const isConfiguredGroupMessage =
-        configuredGroupIdSanitized &&
-        isGroupMessage &&
+        hasConfiguredGroup &&
         (
           chatIdSanitized === configuredGroupIdSanitized ||
           normalizedChatId === normalizedConfiguredGroupId
@@ -716,7 +716,7 @@ const processTelegramUpdates = async () => {
       }
 
       if (chatType !== 'private') {
-        if (!isGroupMessage || !isConfiguredGroupMessage) {
+        if (hasConfiguredGroup && !isConfiguredGroupMessage) {
           await sendTelegramMessage(
             botToken,
             chatId,
