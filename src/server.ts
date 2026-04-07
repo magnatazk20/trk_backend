@@ -628,8 +628,10 @@ const processTelegramUpdates = async () => {
       const telegramUsername = String(message?.from?.username ?? '').trim() || null
       const telegramFirstName = String(message?.from?.first_name ?? '').trim() || null
       const textRaw = String(message?.text ?? '').trim()
-      if (!chatId || !telegramUserId || !textRaw) continue
       const textLower = textRaw.toLowerCase()
+      const normalizedConfiguredGroupId = configuredGroupId.replace(/^-100/, '').trim()
+      const normalizedChatId = chatId.replace(/^-100/, '').trim()
+      if (!chatId || !telegramUserId || !textRaw) continue
 
       if (messageId > 0) {
         const messageKey = `${chatId}:${messageId}`
@@ -643,7 +645,10 @@ const processTelegramUpdates = async () => {
         }
       }
 
-      if (configuredGroupId && chatId === configuredGroupId) {
+      if (
+        configuredGroupId &&
+        (chatId === configuredGroupId || normalizedChatId === normalizedConfiguredGroupId)
+      ) {
         const isCheckinCommand =
           textLower === '/checkin' ||
           textLower.startsWith('/checkin@')
