@@ -644,7 +644,9 @@ const processTelegramUpdates = async () => {
       }
 
       if (configuredGroupId && chatId === configuredGroupId) {
-        const isCheckinCommand = textLower === '/checkin'
+        const isCheckinCommand =
+          textLower === '/checkin' ||
+          textLower.startsWith('/checkin@')
 
         if (!isCheckinCommand) {
           continue
