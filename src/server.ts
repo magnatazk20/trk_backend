@@ -786,12 +786,24 @@ const processTelegramUpdates = async () => {
         const claimResult = await claimCheckinForUser(linkedUserId)
 
         const checkinDay = Number((claimResult as any)?.claim?.day ?? 0)
-        const successMessage = configuredCheckinSuccessMessage.replace('{day}', String(checkinDay))
+        const usernameValue = telegramUsername ? `@${telegramUsername}` : ''
+        const displayNameValue =
+          usernameValue ||
+          String(telegramFirstName ?? '').trim() ||
+          'usuário'
+
+        const interpolateTelegramTemplate = (templateRaw: string) =>
+          String(templateRaw ?? '')
+            .replace(/\{day\}/g, String(checkinDay))
+            .replace(/\{username\}/g, usernameValue)
+            .replace(/\{displayName\}/g, displayNameValue)
+
+        const successMessage = interpolateTelegramTemplate(configuredCheckinSuccessMessage)
         const alreadyClaimed =
           !claimResult.ok &&
           String((claimResult as any)?.error ?? '').trim().toLowerCase() === 'check-in de hoje já foi resgatado.'
         const errorMessage = alreadyClaimed
-          ? configuredCheckinAlreadyClaimedMessage
+          ? interpolateTelegramTemplate(configuredCheckinAlreadyClaimedMessage)
           : String(claimResult.error ?? 'Não foi possível processar seu check-in.')
 
         await sendTelegramMessage(
