@@ -6086,7 +6086,20 @@ app.post('/api/gift-codes/redeem', async (req, res) => {
   }
 })
 
-app.get('/api/referral/commission-levels', async (_req, res) => {
+app.get('/api/referral/commission-levels', async (req, res) => {
+  const debugRequestInfo = {
+    method: req.method,
+    originalUrl: req.originalUrl,
+    path: req.path,
+    query: req.query,
+    params: req.params,
+    ip: req.ip,
+    forwardedFor: req.headers['x-forwarded-for'],
+    userAgent: req.headers['user-agent'],
+  }
+
+  console.info('[referral-commission-levels-request]', debugRequestInfo)
+
   try {
     await ensureCommissionLevelsTable()
 
@@ -6112,9 +6125,20 @@ app.get('/api/referral/commission-levels', async (_req, res) => {
       isActive: Number(row.isActive ?? 1) === 1,
     }))
 
+    console.info('[referral-commission-levels-response]', {
+      ok: true,
+      totalLevels: levels.length,
+      levelsPreview: levels.slice(0, 3),
+      requestPath: req.path,
+      requestOriginalUrl: req.originalUrl,
+    })
+
     res.json({ ok: true, levels })
   } catch (err) {
-    console.error('[referral-commission-levels-get]', err)
+    console.error('[referral-commission-levels-get]', {
+      error: err,
+      request: debugRequestInfo,
+    })
     res.status(500).json({ ok: false, error: 'Erro ao carregar níveis de comissão.' })
   }
 })
