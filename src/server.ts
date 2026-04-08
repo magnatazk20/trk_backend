@@ -5055,6 +5055,7 @@ app.post('/api/withdraw/request', async (req, res) => {
       FROM withdrawals
       WHERE user_id = ?
         AND DATE(created_at) = CURDATE()
+        AND LOWER(status) IN ('paid', 'payment.paid')
       LIMIT 1
       FOR UPDATE
       `,
