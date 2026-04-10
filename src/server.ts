@@ -5049,22 +5049,21 @@ app.post('/api/withdraw/request', async (req, res) => {
 
     const activationTokenId = Number(activationRows[0].id ?? 0)
 
-    const [todayRows] = await conn.query<RowDataPacket[]>(
+    const [openWithdrawRows] = await conn.query<RowDataPacket[]>(
       `
       SELECT id
       FROM withdrawals
       WHERE user_id = ?
-        AND DATE(created_at) = CURDATE()
-        AND LOWER(status) IN ('paid', 'payment.paid')
+        AND LOWER(status) IN ('pending', 'processing')
       LIMIT 1
       FOR UPDATE
       `,
       [parsedUserId]
     )
 
-    if (todayRows.length > 0) {
+    if (openWithdrawRows.length > 0) {
       await conn.rollback()
-      res.status(400).json({ ok: false, error: 'Você já solicitou um saque hoje. Tente novamente amanhã.' })
+      res.status(400).json({ ok: false, error: 'Você já possui um saque em análise/processamento.' })
       return
     }
 
