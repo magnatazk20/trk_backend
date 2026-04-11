@@ -2121,6 +2121,214 @@ app.post('/api/CASHIN/webhook', express.raw({ type: '*/*' }), async (req, res) =
 })
 
 // ─── Start ───────────────────────────────────────────────────────────────────
+app.get('/api/monthly-salary-plans', async (_req, res) => {
+  try {
+    await ensureMonthlySalaryPlansTable()
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        id,
+        title,
+        monthly_salary AS monthlySalary,
+        required_level1_deposited AS requiredLevel1Deposited,
+        required_level2_deposited AS requiredLevel2Deposited,
+        required_level3_deposited AS requiredLevel3Deposited,
+        is_active AS isActive,
+        sort_order AS sortOrder
+      FROM monthly_salary_plans
+      WHERE is_active = 1
+      ORDER BY sort_order ASC, id ASC
+      `
+    )
+
+    const plans = rows.map((row) => ({
+      id: Number(row.id),
+      title: String(row.title ?? ''),
+      monthlySalary: Number(row.monthlySalary ?? 0),
+      requiredLevel1Deposited: Number(row.requiredLevel1Deposited ?? 0),
+      requiredLevel2Deposited: Number(row.requiredLevel2Deposited ?? 0),
+      requiredLevel3Deposited: Number(row.requiredLevel3Deposited ?? 0),
+      isActive: Number(row.isActive ?? 1) === 1,
+      sortOrder: Number(row.sortOrder ?? 0),
+    }))
+
+    res.json({ ok: true, plans })
+  } catch (err) {
+    console.error('[monthly-salary-plans-list]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar planos de salário mensal.' })
+  }
+})
+
+app.post('/api/monthly-salary-plans/claim', async (req, res) => {
+  const { userId, planId } = req.body as { userId?: number; planId?: number }
+
+  const parsedUserId = Number(userId)
+  const parsedPlanId = Number(planId)
+
+  if (!parsedUserId || Number.isNaN(parsedUserId)) {
+    res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  if (!parsedPlanId || Number.isNaN(parsedPlanId)) {
+    res.status(400).json({ ok: false, error: 'ID do plano inválido.' })
+    return
+  }
+
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    await ensureMonthlySalaryPlansTable()
+
+    try {
+      await conn.query(
+        `
+        ALTER TABLE users
+        ADD COLUMN monthly_salary_contract VARCHAR(255) NULL
+        `
+      )
+    } catch {
+      // coluna já existe
+    }
+
+    const [userRows] = await conn.query<RowDataPacket[]>(
+      `
+      SELECT id
+      FROM users
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [parsedUserId]
+    )
+
+    if (userRows.length === 0) {
+      await conn.rollback()
+      res.status(404).json({ ok: false, error: 'Usuário não encontrado.' })
+      return
+    }
+
+    const [planRows] = await conn.query<RowDataPacket[]>(
+      `
+      SELECT
+        id,
+        title,
+        required_level1_deposited AS requiredLevel1Deposited,
+        required_level2_deposited AS requiredLevel2Deposited,
+        required_level3_deposited AS requiredLevel3Deposited,
+        is_active AS isActive
+      FROM monthly_salary_plans
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [parsedPlanId]
+    )
+
+    if (planRows.length === 0 || Number(planRows[0].isActive ?? 0) !== 1) {
+      await conn.rollback()
+      res.status(404).json({ ok: false, error: 'Plano de salário mensal não encontrado ou inativo.' })
+      return
+    }
+
+    const plan = planRows[0]
+    const requiredL1 = Number(plan.requiredLevel1Deposited ?? 0)
+    const requiredL2 = Number(plan.requiredLevel2Deposited ?? 0)
+    const requiredL3 = Number(plan.requiredLevel3Deposited ?? 0)
+
+    const [refCountRows] = await conn.query<RowDataPacket[]>(
+      `
+      WITH RECURSIVE referral_tree AS (
+        SELECT
+          u.id,
+          1 AS level
+        FROM users u
+        WHERE u.referred_by_user_id = ?
+
+        UNION ALL
+
+        SELECT
+          u2.id,
+          rt.level + 1 AS level
+        FROM users u2
+        INNER JOIN referral_tree rt ON u2.referred_by_user_id = rt.id
+        WHERE rt.level < 3
+      ),
+      paid_users AS (
+        SELECT DISTINCT cp.user_id
+        FROM cashin_payments cp
+        WHERE LOWER(cp.status) IN ('paid', 'payment.paid')
+      )
+      SELECT
+        COUNT(DISTINCT CASE WHEN rt.level = 1 AND pu.user_id IS NOT NULL THEN rt.id END) AS level1Deposited,
+        COUNT(DISTINCT CASE WHEN rt.level = 2 AND pu.user_id IS NOT NULL THEN rt.id END) AS level2Deposited,
+        COUNT(DISTINCT CASE WHEN rt.level = 3 AND pu.user_id IS NOT NULL THEN rt.id END) AS level3Deposited
+      FROM referral_tree rt
+      LEFT JOIN paid_users pu ON pu.user_id = rt.id
+      `,
+      [parsedUserId]
+    )
+
+    const level1Deposited = Number(refCountRows[0]?.level1Deposited ?? 0)
+    const level2Deposited = Number(refCountRows[0]?.level2Deposited ?? 0)
+    const level3Deposited = Number(refCountRows[0]?.level3Deposited ?? 0)
+
+    const hasRequirements =
+      level1Deposited >= requiredL1 &&
+      level2Deposited >= requiredL2 &&
+      level3Deposited >= requiredL3
+
+    if (!hasRequirements) {
+      await conn.rollback()
+      res.status(400).json({
+        ok: false,
+        error: 'Usuário não atende os requisitos para obter este contrato.',
+        requirements: {
+          requiredLevel1Deposited: requiredL1,
+          requiredLevel2Deposited: requiredL2,
+          requiredLevel3Deposited: requiredL3,
+        },
+        current: {
+          level1Deposited,
+          level2Deposited,
+          level3Deposited,
+        },
+      })
+      return
+    }
+
+    const contractLabel = `Contrato: ${String(plan.title ?? 'Start V1').trim() || 'Start V1'}`
+
+    await conn.query(
+      `
+      UPDATE users
+      SET monthly_salary_contract = ?
+      WHERE id = ?
+      `,
+      [contractLabel, parsedUserId]
+    )
+
+    await conn.commit()
+
+    res.json({
+      ok: true,
+      message: 'Contrato obtido com sucesso.',
+      contract: contractLabel,
+      plan: {
+        id: Number(plan.id),
+        title: String(plan.title ?? ''),
+      },
+    })
+  } catch (err) {
+    await conn.rollback()
+    console.error('[monthly-salary-claim]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao obter contrato de salário mensal.' })
+  } finally {
+    conn.release()
+  }
+})
+
 app.get('/api/referral/:userId', async (req, res) => {
   const userId = Number(req.params.userId)
 
@@ -6039,6 +6247,55 @@ const ensureCommissionPayoutsTable = async () => {
     )
     `
   )
+}
+
+const ensureMonthlySalaryPlansTable = async () => {
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS monthly_salary_plans (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      title VARCHAR(150) NOT NULL,
+      monthly_salary DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      required_level1_deposited INT NOT NULL DEFAULT 0,
+      required_level2_deposited INT NOT NULL DEFAULT 0,
+      required_level3_deposited INT NOT NULL DEFAULT 0,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      sort_order INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_monthly_salary_plans_active (is_active),
+      KEY idx_monthly_salary_plans_sort (sort_order)
+    )
+    `
+  )
+
+  const [countRows] = await pool.query<RowDataPacket[]>(
+    `
+    SELECT COUNT(*) AS total
+    FROM monthly_salary_plans
+    `
+  )
+
+  const total = Number(countRows[0]?.total ?? 0)
+  if (total === 0) {
+    await pool.query(
+      `
+      INSERT INTO monthly_salary_plans
+      (
+        title,
+        monthly_salary,
+        required_level1_deposited,
+        required_level2_deposited,
+        required_level3_deposited,
+        is_active,
+        sort_order
+      )
+      VALUES
+      ('Start V1', 100.00, 100, 0, 0, 1, 1)
+      `
+    )
+  }
 }
 
 const applyReferralCommissionsForDeposit = async (cashinPaymentId: number, depositorUserId: number, depositAmount: number) => {
