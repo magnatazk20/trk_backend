@@ -480,6 +480,7 @@ const sendTelegramMessage = async (
   options?: {
     replyMarkup?: Record<string, unknown>
     parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML'
+    replyToMessageId?: number
   }
 ) => {
   if (!botToken || !chatId) return
@@ -494,6 +495,9 @@ const sendTelegramMessage = async (
         text,
         ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
         ...(options?.parseMode ? { parse_mode: options.parseMode } : {}),
+        ...(Number.isInteger(options?.replyToMessageId)
+          ? { reply_to_message_id: Number(options?.replyToMessageId), allow_sending_without_reply: true }
+          : {}),
       }),
     })
   } catch (err) {
@@ -737,6 +741,10 @@ const processTelegramUpdates = async () => {
       const chatId = String(message?.chat?.id ?? '').trim()
       const chatType = String(message?.chat?.type ?? '').trim().toLowerCase()
       const messageId = Number(message?.message_id ?? 0)
+      const telegramReplyOptions =
+        Number.isInteger(messageId) && messageId > 0
+          ? { replyToMessageId: messageId }
+          : undefined
       const telegramUserId = String(message?.from?.id ?? '').trim()
       const telegramUsername = String(message?.from?.username ?? '').trim() || null
       const telegramFirstName = String(message?.from?.first_name ?? '').trim() || null
@@ -835,7 +843,7 @@ const processTelegramUpdates = async () => {
           )
 
           if (tokenRows.length === 0) {
-            await sendTelegramMessage(botToken, chatId, 'Token de ativação inválido.')
+            await sendTelegramMessage(botToken, chatId, 'Token de ativação inválido.', telegramReplyOptions)
             continue
           }
 
@@ -846,7 +854,7 @@ const processTelegramUpdates = async () => {
           const expiresAt = tokenRow.expiresAt ? new Date(tokenRow.expiresAt) : null
 
           if (tokenStatus !== 'pending') {
-            await sendTelegramMessage(botToken, chatId, 'Este token já foi utilizado ou expirou.')
+            await sendTelegramMessage(botToken, chatId, 'Este token já foi utilizado ou expirou.', telegramReplyOptions)
             continue
           }
 
@@ -859,7 +867,7 @@ const processTelegramUpdates = async () => {
               `,
               [tokenId]
             )
-            await sendTelegramMessage(botToken, chatId, 'Token expirado. Gere um novo token no app.')
+            await sendTelegramMessage(botToken, chatId, 'Token expirado. Gere um novo token no app.', telegramReplyOptions)
             continue
           }
 
@@ -876,13 +884,13 @@ const processTelegramUpdates = async () => {
           )
 
           if (connectionRows.length === 0) {
-            await sendTelegramMessage(botToken, chatId, 'Você precisa vincular sua conta primeiro no privado do bot.')
+            await sendTelegramMessage(botToken, chatId, 'Você precisa vincular sua conta primeiro no privado do bot.', telegramReplyOptions)
             continue
           }
 
           const linkedUserId = Number(connectionRows[0].userId ?? 0)
           if (linkedUserId !== tokenUserId) {
-            await sendTelegramMessage(botToken, chatId, 'Este token não pertence à sua conta.')
+            await sendTelegramMessage(botToken, chatId, 'Este token não pertence à sua conta.', telegramReplyOptions)
             continue
           }
 
@@ -900,7 +908,7 @@ const processTelegramUpdates = async () => {
             [telegramUserId, chatId, tokenId]
           )
 
-          await sendTelegramMessage(botToken, chatId, '✅ Saque ativado com sucesso para sua conta.')
+          await sendTelegramMessage(botToken, chatId, '✅ Saque ativado com sucesso para sua conta.', telegramReplyOptions)
           continue
         }
 
@@ -941,13 +949,16 @@ const processTelegramUpdates = async () => {
             botToken,
             chatId,
             `⚠️ Lembrete ${usernameValue} Você ainda não vinculou sua conta PGLM e não pode receber recompensas de check-in! Clique no botão abaixo para vincular`,
-            botUrl
-              ? {
-                  replyMarkup: {
-                    inline_keyboard: [[{ text: botButtonLabel, url: botUrl }]],
-                  },
-                }
-              : undefined
+            {
+              ...(botUrl
+                ? {
+                    replyMarkup: {
+                      inline_keyboard: [[{ text: botButtonLabel, url: botUrl }]],
+                    },
+                  }
+                : {}),
+              ...(telegramReplyOptions ?? {}),
+            }
           )
           continue
         }
@@ -979,7 +990,8 @@ const processTelegramUpdates = async () => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          claimResult.ok ? successMessage : errorMessage
+          claimResult.ok ? successMessage : errorMessage,
+          telegramReplyOptions
         )
         continue
       }
@@ -1000,7 +1012,8 @@ const processTelegramUpdates = async () => {
           await sendTelegramMessage(
             botToken,
             chatId,
-            'Mensagem de boas-vindas não configurada. Peça ao administrador para configurar em /adf/telegram-config.'
+            'Mensagem de boas-vindas não configurada. Peça ao administrador para configurar em /adf/telegram-config.',
+            telegramReplyOptions
           )
         }
         continue
@@ -1011,7 +1024,8 @@ const processTelegramUpdates = async () => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          'Para conectar sua conta, envie APENAS o telefone cadastrado na plataforma (somente no privado do bot). Exemplo: 11999998888'
+          'Para conectar sua conta, envie APENAS o telefone cadastrado na plataforma (somente no privado do bot). Exemplo: 11999998888',
+          telegramReplyOptions
         )
         continue
       }
@@ -1030,7 +1044,8 @@ const processTelegramUpdates = async () => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          'Telefone não encontrado. Envie o telefone exatamente como cadastrado.'
+          'Telefone não encontrado. Envie o telefone exatamente como cadastrado.',
+          telegramReplyOptions
         )
         continue
       }
@@ -1054,7 +1069,8 @@ const processTelegramUpdates = async () => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          duplicateConnectionMessage
+          duplicateConnectionMessage,
+          telegramReplyOptions
         )
         continue
       }
@@ -1084,7 +1100,8 @@ const processTelegramUpdates = async () => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          duplicateConnectionMessage
+          duplicateConnectionMessage,
+          telegramReplyOptions
         )
         continue
       }
@@ -1117,7 +1134,8 @@ const processTelegramUpdates = async () => {
           await sendTelegramMessage(
             botToken,
             chatId,
-            duplicateConnectionMessage
+            duplicateConnectionMessage,
+            telegramReplyOptions
           )
           continue
         }
@@ -1172,7 +1190,8 @@ const processTelegramUpdates = async () => {
           await sendTelegramMessage(
             botToken,
             chatId,
-            'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.'
+            'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.',
+            telegramReplyOptions
           )
           continue
         }
@@ -1212,7 +1231,8 @@ const processTelegramUpdates = async () => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.'
+          'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.',
+          telegramReplyOptions
         )
         continue
       } finally {
@@ -1249,7 +1269,8 @@ const processTelegramUpdates = async () => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.'
+          'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.',
+          telegramReplyOptions
         )
         continue
       }
@@ -1274,7 +1295,8 @@ const processTelegramUpdates = async () => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          '❌ Esta conta já possui conexão ativa com o Telegram.'
+          '❌ Esta conta já possui conexão ativa com o Telegram.',
+          telegramReplyOptions
         )
         continue
       }
@@ -1295,7 +1317,7 @@ const processTelegramUpdates = async () => {
         connectedAt: new Date().toISOString(),
       })
 
-      await sendTelegramMessage(botToken, chatId, privateLinkSuccessMessage)
+      await sendTelegramMessage(botToken, chatId, privateLinkSuccessMessage, telegramReplyOptions)
     }
   } catch (err) {
     console.error('[telegram-polling]', err)
