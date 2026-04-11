@@ -1700,8 +1700,19 @@ app.get('/api/user/summary/:id', async (req, res) => {
   }
 
   try {
+    try {
+      await pool.query(
+        `
+        ALTER TABLE users
+        ADD COLUMN monthly_salary_contract VARCHAR(255) NULL
+        `
+      )
+    } catch {
+      // coluna já existe
+    }
+
     const [rows] = await pool.query<RowDataPacket[]>(
-      'SELECT balance, total_deposits FROM users WHERE id = ?',
+      'SELECT balance, total_deposits, monthly_salary_contract AS monthlySalaryContract FROM users WHERE id = ?',
       [userId]
     )
 
@@ -1710,11 +1721,16 @@ app.get('/api/user/summary/:id', async (req, res) => {
       return
     }
 
-    const row = rows[0] as { balance: number | string; total_deposits: number | string }
+    const row = rows[0] as {
+      balance: number | string
+      total_deposits: number | string
+      monthlySalaryContract?: string | null
+    }
 
     res.json({
       balance: Number(row.balance ?? 0),
       totalDeposits: Number(row.total_deposits ?? 0),
+      monthlySalaryContract: row.monthlySalaryContract == null ? null : String(row.monthlySalaryContract),
     })
   } catch (err) {
     console.error('[user-summary]', err)
@@ -2298,7 +2314,7 @@ app.post('/api/monthly-salary-plans/claim', async (req, res) => {
       return
     }
 
-    const contractLabel = `Contrato: ${String(plan.title ?? 'Start V1').trim() || 'Start V1'}`
+    const contractLabel = String(plan.title ?? 'Start V1').trim() || 'Start V1'
     const currentContract = String(userRows[0]?.monthlySalaryContract ?? '').trim()
 
     if (currentContract && currentContract === contractLabel) {
@@ -3428,7 +3444,7 @@ app.post('/api/cycle-products/purchase', async (req, res) => {
       [amount, parsedUserId]
     )
 
-    await conn.query(
+    const [purchaseInsertResult] = await conn.query(
       `
       INSERT INTO user_cycle_purchases
       (
@@ -3450,6 +3466,63 @@ app.post('/api/cycle-products/purchase', async (req, res) => {
         Number(product.profit ?? 0),
         Number(product.cycleDays ?? 0),
         Number(product.cycleDays ?? 0),
+      ]
+    ) as any
+
+    const newBalance = Number((userBalance - amount).toFixed(2))
+
+    await conn.query(
+      `
+      CREATE TABLE IF NOT EXISTS logs (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id BIGINT UNSIGNED NULL,
+        entity_type VARCHAR(60) NOT NULL,
+        entity_id BIGINT UNSIGNED NULL,
+        action VARCHAR(100) NOT NULL,
+        old_balance DECIMAL(12,2) NULL,
+        new_balance DECIMAL(12,2) NULL,
+        amount DECIMAL(12,2) NULL,
+        metadata JSON NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_logs_user_id (user_id),
+        KEY idx_logs_entity_type (entity_type),
+        KEY idx_logs_entity_id (entity_id),
+        KEY idx_logs_action (action),
+        KEY idx_logs_created_at (created_at)
+      )
+      `
+    )
+
+    await conn.query(
+      `
+      INSERT INTO logs
+      (
+        user_id,
+        entity_type,
+        entity_id,
+        action,
+        old_balance,
+        new_balance,
+        amount,
+        metadata
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        parsedUserId,
+        'cycle',
+        Number(purchaseInsertResult?.insertId ?? 0),
+        'cycle_investment_purchase',
+        Number(userBalance.toFixed(2)),
+        Number(newBalance.toFixed(2)),
+        Number(amount.toFixed(2)),
+        JSON.stringify({
+          cycleProductId: Number(product.id),
+          cycleDays: Number(product.cycleDays ?? 0),
+          expectedProfit: Number(product.profit ?? 0),
+          purchaseId: Number(purchaseInsertResult?.insertId ?? 0),
+        }),
       ]
     )
 
