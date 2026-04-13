@@ -2200,6 +2200,257 @@ app.get('/api/monthly-salary-plans', async (_req, res) => {
   }
 })
 
+app.get('/api/admin/monthly-salary-plans', requireMaxAdmin, async (_req, res) => {
+  try {
+    await ensureMonthlySalaryPlansTable()
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        id,
+        title,
+        monthly_salary AS monthlySalary,
+        required_level1_deposited AS requiredLevel1Deposited,
+        required_level2_deposited AS requiredLevel2Deposited,
+        required_level3_deposited AS requiredLevel3Deposited,
+        is_active AS isActive,
+        sort_order AS sortOrder
+      FROM monthly_salary_plans
+      ORDER BY sort_order ASC, id ASC
+      `
+    )
+
+    const plans = rows.map((row) => ({
+      id: Number(row.id),
+      title: String(row.title ?? ''),
+      monthlySalary: Number(row.monthlySalary ?? 0),
+      requiredLevel1Deposited: Number(row.requiredLevel1Deposited ?? 0),
+      requiredLevel2Deposited: Number(row.requiredLevel2Deposited ?? 0),
+      requiredLevel3Deposited: Number(row.requiredLevel3Deposited ?? 0),
+      isActive: Number(row.isActive ?? 1) === 1,
+      sortOrder: Number(row.sortOrder ?? 0),
+    }))
+
+    res.json({ ok: true, plans })
+  } catch (err) {
+    console.error('[admin-monthly-salary-plans-list]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar planos de salário mensal.' })
+  }
+})
+
+app.post('/api/admin/monthly-salary-plans', requireMaxAdmin, async (req, res) => {
+  const {
+    title,
+    monthlySalary,
+    requiredLevel1Deposited,
+    requiredLevel2Deposited,
+    requiredLevel3Deposited,
+    isActive,
+    sortOrder,
+  } = req.body as {
+    title?: string
+    monthlySalary?: number | string
+    requiredLevel1Deposited?: number | string
+    requiredLevel2Deposited?: number | string
+    requiredLevel3Deposited?: number | string
+    isActive?: boolean | number | string
+    sortOrder?: number | string
+  }
+
+  const parsedTitle = String(title ?? '').trim()
+  const parsedMonthlySalary = Number(String(monthlySalary ?? '').replace(',', '.'))
+  const parsedL1 = Number(String(requiredLevel1Deposited ?? 0))
+  const parsedL2 = Number(String(requiredLevel2Deposited ?? 0))
+  const parsedL3 = Number(String(requiredLevel3Deposited ?? 0))
+  const parsedSortOrder = Number(String(sortOrder ?? 0))
+  const parsedIsActive =
+    isActive === true || isActive === 1 || String(isActive ?? '').toLowerCase() === 'true' ? 1 : 0
+
+  if (!parsedTitle) {
+    res.status(400).json({ ok: false, error: 'Título do plano é obrigatório.' })
+    return
+  }
+
+  if (!Number.isFinite(parsedMonthlySalary) || parsedMonthlySalary < 0) {
+    res.status(400).json({ ok: false, error: 'Salário mensal inválido.' })
+    return
+  }
+
+  if (!Number.isInteger(parsedL1) || parsedL1 < 0 || !Number.isInteger(parsedL2) || parsedL2 < 0 || !Number.isInteger(parsedL3) || parsedL3 < 0) {
+    res.status(400).json({ ok: false, error: 'Requisitos de níveis inválidos.' })
+    return
+  }
+
+  if (!Number.isInteger(parsedSortOrder)) {
+    res.status(400).json({ ok: false, error: 'Ordem inválida.' })
+    return
+  }
+
+  try {
+    await ensureMonthlySalaryPlansTable()
+
+    const [result] = await pool.query(
+      `
+      INSERT INTO monthly_salary_plans
+      (
+        title,
+        monthly_salary,
+        required_level1_deposited,
+        required_level2_deposited,
+        required_level3_deposited,
+        is_active,
+        sort_order
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        parsedTitle,
+        Number(parsedMonthlySalary.toFixed(2)),
+        parsedL1,
+        parsedL2,
+        parsedL3,
+        parsedIsActive,
+        parsedSortOrder,
+      ]
+    ) as any
+
+    res.status(201).json({
+      ok: true,
+      message: 'Plano criado com sucesso.',
+      plan: {
+        id: Number(result?.insertId ?? 0),
+        title: parsedTitle,
+      },
+    })
+  } catch (err) {
+    console.error('[admin-monthly-salary-plans-create]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao criar plano de salário mensal.' })
+  }
+})
+
+app.put('/api/admin/monthly-salary-plans/:id', requireMaxAdmin, async (req, res) => {
+  const planId = Number(req.params.id)
+  const {
+    title,
+    monthlySalary,
+    requiredLevel1Deposited,
+    requiredLevel2Deposited,
+    requiredLevel3Deposited,
+    isActive,
+    sortOrder,
+  } = req.body as {
+    title?: string
+    monthlySalary?: number | string
+    requiredLevel1Deposited?: number | string
+    requiredLevel2Deposited?: number | string
+    requiredLevel3Deposited?: number | string
+    isActive?: boolean | number | string
+    sortOrder?: number | string
+  }
+
+  if (!planId || Number.isNaN(planId)) {
+    res.status(400).json({ ok: false, error: 'ID do plano inválido.' })
+    return
+  }
+
+  const parsedTitle = String(title ?? '').trim()
+  const parsedMonthlySalary = Number(String(monthlySalary ?? '').replace(',', '.'))
+  const parsedL1 = Number(String(requiredLevel1Deposited ?? 0))
+  const parsedL2 = Number(String(requiredLevel2Deposited ?? 0))
+  const parsedL3 = Number(String(requiredLevel3Deposited ?? 0))
+  const parsedSortOrder = Number(String(sortOrder ?? 0))
+  const parsedIsActive =
+    isActive === true || isActive === 1 || String(isActive ?? '').toLowerCase() === 'true' ? 1 : 0
+
+  if (!parsedTitle) {
+    res.status(400).json({ ok: false, error: 'Título do plano é obrigatório.' })
+    return
+  }
+
+  if (!Number.isFinite(parsedMonthlySalary) || parsedMonthlySalary < 0) {
+    res.status(400).json({ ok: false, error: 'Salário mensal inválido.' })
+    return
+  }
+
+  if (!Number.isInteger(parsedL1) || parsedL1 < 0 || !Number.isInteger(parsedL2) || parsedL2 < 0 || !Number.isInteger(parsedL3) || parsedL3 < 0) {
+    res.status(400).json({ ok: false, error: 'Requisitos de níveis inválidos.' })
+    return
+  }
+
+  if (!Number.isInteger(parsedSortOrder)) {
+    res.status(400).json({ ok: false, error: 'Ordem inválida.' })
+    return
+  }
+
+  try {
+    await ensureMonthlySalaryPlansTable()
+
+    const [result] = await pool.query(
+      `
+      UPDATE monthly_salary_plans
+      SET
+        title = ?,
+        monthly_salary = ?,
+        required_level1_deposited = ?,
+        required_level2_deposited = ?,
+        required_level3_deposited = ?,
+        is_active = ?,
+        sort_order = ?,
+        updated_at = NOW()
+      WHERE id = ?
+      `,
+      [
+        parsedTitle,
+        Number(parsedMonthlySalary.toFixed(2)),
+        parsedL1,
+        parsedL2,
+        parsedL3,
+        parsedIsActive,
+        parsedSortOrder,
+        planId,
+      ]
+    ) as any
+
+    if (Number(result?.affectedRows ?? 0) <= 0) {
+      res.status(404).json({ ok: false, error: 'Plano não encontrado.' })
+      return
+    }
+
+    res.json({ ok: true, message: 'Plano atualizado com sucesso.' })
+  } catch (err) {
+    console.error('[admin-monthly-salary-plans-update]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao atualizar plano de salário mensal.' })
+  }
+})
+
+app.delete('/api/admin/monthly-salary-plans/:id', requireMaxAdmin, async (req, res) => {
+  const planId = Number(req.params.id)
+
+  if (!planId || Number.isNaN(planId)) {
+    res.status(400).json({ ok: false, error: 'ID do plano inválido.' })
+    return
+  }
+
+  try {
+    await ensureMonthlySalaryPlansTable()
+
+    const [result] = await pool.query(
+      'DELETE FROM monthly_salary_plans WHERE id = ?',
+      [planId]
+    ) as any
+
+    if (Number(result?.affectedRows ?? 0) <= 0) {
+      res.status(404).json({ ok: false, error: 'Plano não encontrado.' })
+      return
+    }
+
+    res.json({ ok: true, message: 'Plano apagado com sucesso.' })
+  } catch (err) {
+    console.error('[admin-monthly-salary-plans-delete]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao apagar plano de salário mensal.' })
+  }
+})
+
 app.post('/api/monthly-salary-plans/claim', async (req, res) => {
   const { userId, planId } = req.body as { userId?: number; planId?: number }
 
@@ -10563,6 +10814,84 @@ app.get('/api/admin/logs', requireMaxAdmin, async (req, res) => {
   }
 })
 
+app.get('/api/admin/users/:id/withdraw-activation-token-info', requireMaxAdmin, async (req, res) => {
+  const userId = Number(req.params.id)
+
+  if (!userId || Number.isNaN(userId)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+
+  try {
+    const [userRows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT id, name, phone
+      FROM users
+      WHERE id = ?
+      LIMIT 1
+      `,
+      [userId]
+    )
+
+    if (userRows.length === 0) {
+      res.status(404).json({ ok: false, error: 'Usuário não encontrado.' })
+      return
+    }
+
+    await ensureWithdrawActivationTokensTable()
+
+    const [tokenRows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        id,
+        user_id AS userId,
+        token,
+        status,
+        telegram_user_id AS telegramUserId,
+        activated_chat_id AS activatedChatId,
+        activated_at AS activatedAt,
+        expires_at AS expiresAt,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM withdraw_activation_tokens
+      WHERE user_id = ?
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [userId]
+    )
+
+    const user = userRows[0]
+    const tokenInfo = tokenRows[0] ?? null
+
+    res.json({
+      ok: true,
+      user: {
+        id: Number(user.id),
+        name: String(user.name ?? ''),
+        phone: String(user.phone ?? ''),
+      },
+      tokenInfo: tokenInfo
+        ? {
+            id: Number(tokenInfo.id ?? 0),
+            userId: Number(tokenInfo.userId ?? userId),
+            token: String(tokenInfo.token ?? ''),
+            status: String(tokenInfo.status ?? ''),
+            telegramUserId: tokenInfo.telegramUserId == null ? null : String(tokenInfo.telegramUserId),
+            activatedChatId: tokenInfo.activatedChatId == null ? null : String(tokenInfo.activatedChatId),
+            activatedAt: tokenInfo.activatedAt ?? null,
+            expiresAt: tokenInfo.expiresAt ?? null,
+            createdAt: tokenInfo.createdAt ?? null,
+            updatedAt: tokenInfo.updatedAt ?? null,
+          }
+        : null,
+    })
+  } catch (err) {
+    console.error('[admin-user-withdraw-activation-token-info]', err)
+    res.status(500).json({ ok: false, error: 'Falha ao carregar token de ativação de saque.' })
+  }
+})
+
 app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
   const userId = Number(req.params.id)
 
@@ -10588,7 +10917,9 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         is_admin,
         COALESCE(is_banned, 0) AS is_banned,
         created_at,
-        COALESCE(balance, 0) AS balance
+        COALESCE(balance, 0) AS balance,
+        COALESCE(telegram_conectado, 0) AS telegramConectado,
+        monthly_salary_contract AS activeContract
       FROM users
       WHERE id = ?
       LIMIT 1
@@ -10907,6 +11238,8 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         is_banned: Number(user.is_banned ?? 0),
         created_at: user.created_at,
         balance: Number(user.balance ?? 0),
+        telegramConectado: Number(user.telegramConectado ?? 0),
+        activeContract: user.activeContract == null ? null : String(user.activeContract),
         totalDepositsPaid: Number(depositRows[0]?.total ?? 0),
         totalWithdrawals,
         totalCyclePlansBought,
