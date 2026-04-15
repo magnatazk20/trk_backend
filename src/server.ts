@@ -1588,9 +1588,11 @@ const bootstrapDatabase = async () => {
   await ensureTelegramConnectedSync()
   await ensureWithdrawActivationTokensTable()
   await ensureCommissionLevelsTable()
+  await ensureVipAndMiningTables()
   console.log('[bootstrap-database] telegram config e conexões garantidas')
   console.log('[bootstrap-database] withdraw_activation_tokens table ensured')
   console.log('[bootstrap-database] commission_levels table ensured')
+  console.log('[bootstrap-database] vip/mining tables ensured')
 }
 
 bootstrapDatabase().catch((err) => {
@@ -6540,6 +6542,78 @@ const ensureCycleProductsTable = async () => {
   `)
 }
 
+type CommissionLevelRequirementInput = {
+  commissionLevelId?: number | string
+  requiredCount?: number | string
+}
+
+const normalizeCommissionLevelRequirementsInput = (value: unknown): Array<{ commissionLevelId: number; requiredCount: number }> => {
+  if (!Array.isArray(value)) return []
+
+  const normalized = value
+    .map((item) => {
+      const typed = (item ?? {}) as CommissionLevelRequirementInput
+      const commissionLevelId = Number(typed.commissionLevelId)
+      const requiredCount = Number(typed.requiredCount)
+
+      if (!Number.isInteger(commissionLevelId) || commissionLevelId <= 0) return null
+      if (!Number.isInteger(requiredCount) || requiredCount < 0) return null
+
+      return { commissionLevelId, requiredCount }
+    })
+    .filter((item): item is { commissionLevelId: number; requiredCount: number } => Boolean(item))
+
+  const dedupMap = new Map<number, number>()
+  for (const item of normalized) {
+    dedupMap.set(item.commissionLevelId, item.requiredCount)
+  }
+
+  return Array.from(dedupMap.entries()).map(([commissionLevelId, requiredCount]) => ({
+    commissionLevelId,
+    requiredCount,
+  }))
+}
+
+const loadCycleProductRequirementsMap = async () => {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `
+    SELECT
+      cpr.cycle_product_id AS cycleProductId,
+      cpr.commission_level_id AS commissionLevelId,
+      cpr.required_count AS requiredCount,
+      cl.level AS level,
+      cl.name AS levelName
+    FROM cycle_product_commission_requirements cpr
+    INNER JOIN commission_levels cl ON cl.id = cpr.commission_level_id
+    WHERE cl.is_active = 1
+    ORDER BY cpr.cycle_product_id ASC, cl.level ASC, cpr.id ASC
+    `
+  )
+
+  const requirementsMap = new Map<number, Array<{
+    commissionLevelId: number
+    level: number
+    levelName: string
+    requiredCount: number
+  }>>()
+
+  for (const row of rows) {
+    const productId = Number(row.cycleProductId ?? 0)
+    if (!productId) continue
+
+    const list = requirementsMap.get(productId) ?? []
+    list.push({
+      commissionLevelId: Number(row.commissionLevelId ?? 0),
+      level: Number(row.level ?? 0),
+      levelName: String(row.levelName ?? ''),
+      requiredCount: Number(row.requiredCount ?? 0),
+    })
+    requirementsMap.set(productId, list)
+  }
+
+  return requirementsMap
+}
+
 const ensureGiftVoucherTables = async () => {
   await pool.query(
     `
@@ -6599,6 +6673,136 @@ const ensureGiftVoucherTables = async () => {
     ALTER TABLE gift_voucher_purchases
     ADD COLUMN generated_gift_code_id BIGINT UNSIGNED NULL
   `)
+}
+
+const ensureVipAndMiningTables = async () => {
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS mining_tasks (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(120) NOT NULL,
+      description VARCHAR(255) NOT NULL,
+      daily_limit INT NOT NULL DEFAULT 1,
+      reward_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    )
+    `
+  )
+
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS user_mining_task_progress (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      task_id BIGINT UNSIGNED NOT NULL,
+      progress_date DATE NOT NULL,
+      completed_count INT NOT NULL DEFAULT 0,
+      earned_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_user_task_date (user_id, task_id, progress_date),
+      KEY idx_user_progress (user_id, progress_date),
+      KEY idx_task_progress (task_id, progress_date)
+    )
+    `
+  )
+
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS vip_levels (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(80) NOT NULL,
+      price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      daily_task_limit INT NOT NULL DEFAULT 0,
+      task_reward_multiplier DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+      benefits TEXT NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      sort_order INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    )
+    `
+  )
+
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS user_vips (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      vip_level_id BIGINT UNSIGNED NOT NULL,
+      status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
+      started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_user_vips_user_id (user_id),
+      KEY idx_user_vips_level_id (vip_level_id),
+      KEY idx_user_vips_status (status)
+    )
+    `
+  )
+
+  await pool.query(
+    `
+    CREATE TABLE IF NOT EXISTS vip_purchase_history (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      vip_level_id BIGINT UNSIGNED NOT NULL,
+      amount_paid DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      balance_before DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      balance_after DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_vip_purchase_user_id (user_id),
+      KEY idx_vip_purchase_level_id (vip_level_id)
+    )
+    `
+  )
+
+  const [vipCountRows] = await pool.query<RowDataPacket[]>(
+    'SELECT COUNT(*) AS total FROM vip_levels'
+  )
+
+  const totalVips = Number(vipCountRows[0]?.total ?? 0)
+
+  if (totalVips === 0) {
+    await pool.query(
+      `
+      INSERT INTO vip_levels
+        (name, price, daily_task_limit, task_reward_multiplier, benefits, is_active, sort_order)
+      VALUES
+        ('VIP 1', 29.90, 5, 1.10, 'Acesso básico às tarefas VIP', 1, 1),
+        ('VIP 2', 59.90, 10, 1.20, 'Limite diário maior + prioridade padrão', 1, 2),
+        ('VIP 3', 99.90, 20, 1.35, 'Bônus de comissão intermediário', 1, 3),
+        ('VIP 4', 199.90, 35, 1.50, 'Comissão avançada e suporte prioritário', 1, 4),
+        ('VIP 5', 399.90, 60, 2.00, 'Plano máximo com maiores ganhos', 1, 5)
+      `
+    )
+  }
+
+  const [taskCountRows] = await pool.query<RowDataPacket[]>(
+    'SELECT COUNT(*) AS total FROM mining_tasks'
+  )
+
+  const totalTasks = Number(taskCountRows[0]?.total ?? 0)
+
+  if (totalTasks === 0) {
+    await pool.query(
+      `
+      INSERT INTO mining_tasks (name, description, daily_limit, reward_amount, is_active)
+      VALUES
+        ('Mineração Bronze', 'Execute mineração básica com baixo consumo.', 10, 0.50, 1),
+        ('Mineração Prata', 'Mineração intermediária com retorno estável.', 6, 1.00, 1),
+        ('Mineração Ouro', 'Mineração avançada com maior recompensa.', 3, 2.50, 1)
+      `
+    )
+  }
 }
 
 const ensureCommissionLevelsTable = async () => {
