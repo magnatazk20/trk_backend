@@ -1550,6 +1550,19 @@ const settleExpiredCyclesForUser = async (userId: number) => {
 app.use(cors())
 app.use(express.json())
 
+// ─── Log de todas as requisições HTTP ────────────────────────────────────────
+app.use((req, res, next) => {
+  const startedAt = Date.now()
+  const requestId = Math.random().toString(36).slice(2, 10)
+  console.log(`[http] -> ${requestId} ${req.method} ${req.originalUrl}`)
+  res.on('finish', () => {
+    const ms = Date.now() - startedAt
+    const level = res.statusCode >= 500 ? 'ERROR' : res.statusCode >= 400 ? 'WARN' : 'INFO'
+    console.log(`[http] [${level}] <- ${requestId} ${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms`)
+  })
+  next()
+})
+
 // ─── Headers de segurança HTTP ───────────────────────────────────────────────
 app.use((_req, res, next) => {
   // Impede carregamento em iframes (clickjacking)
@@ -12947,20 +12960,16 @@ process.on('uncaughtException', (error) => {
   console.error('[uncaughtException]', error)
 })
 
-app.use((req, _res, next) => {
-  const startedAt = Date.now()
-  const requestId = Math.random().toString(36).slice(2, 10)
+// ─── 404 — rota não encontrada ───────────────────────────────────────────────
+app.use((req, res) => {
+  console.warn(`[404] ${req.method} ${req.originalUrl} — rota não encontrada`)
+  res.status(404).json({ ok: false, error: `Rota não encontrada: ${req.method} ${req.originalUrl}` })
+})
 
-  console.log(`[http] -> id=${requestId} ${req.method} ${req.originalUrl}`)
-
-  _res.on('finish', () => {
-    const ms = Date.now() - startedAt
-    console.log(
-      `[http] <- id=${requestId} ${req.method} ${req.originalUrl} status=${_res.statusCode} ${ms}ms`
-    )
-  })
-
-  next()
+// ─── Erro global — captura qualquer exceção não tratada nas rotas ─────────────
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  console.error(`[500] ${req.method} ${req.originalUrl}`, err)
+  res.status(500).json({ ok: false, error: 'Erro interno do servidor.' })
 })
 
 io.on('connection', (socket) => {
