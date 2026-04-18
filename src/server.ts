@@ -8,7 +8,7 @@ import { createServer } from 'http'
 import { Server as SocketIOServer } from 'socket.io'
 import pool, { DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER } from './db'
 import type { NextFunction, Request, Response } from 'express'
-import type { RowDataPacket } from 'mysql2'
+import type { RowDataPacket, ResultSetHeader } from 'mysql2'
 import mysql from 'mysql2/promise'
 
 dotenv.config()
@@ -13749,6 +13749,77 @@ app.post('/api/shop/purchase', requireAuth, async (req: AuthenticatedRequest, re
   } finally {
     conn.release()
   }
+})
+
+// ─── GIFT CARDS DA LOJA ──────────────────────────────────────────────────────
+
+// Garante a tabela gift_cards existe
+async function ensureGiftCardsTable(): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gift_cards (
+      id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      user_id    INT UNSIGNED NOT NULL,
+      name       VARCHAR(200) NOT NULL,
+      platform   VARCHAR(100) NULL,
+      value      DECIMAL(12,2) NOT NULL DEFAULT 0,
+      code       VARCHAR(500) NOT NULL,
+      status     ENUM('disponivel','usado') NOT NULL DEFAULT 'disponivel',
+      image_url  VARCHAR(500) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_user (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `)
+}
+ensureGiftCardsTable().catch(err => console.error('[gift_cards table]', err))
+
+// GET /api/shop/giftcards/:userId — gift cards do usuário
+app.get('/api/shop/giftcards/:userId', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = Number(req.params.userId)
+  if (!userId || Number.isNaN(userId)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, user_id AS userId, name, platform, value, code, status,
+              image_url AS imageUrl, created_at AS createdAt
+       FROM gift_cards WHERE user_id = ? ORDER BY created_at DESC`,
+      [userId]
+    )
+    res.json(rows)
+  } catch {
+    res.json([])
+  }
+})
+
+// POST /api/admin/shop/giftcards — admin entrega gift card para usuário
+app.post('/api/admin/shop/giftcards', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
+  const { userId, name, platform, value, code, imageUrl } = req.body as {
+    userId?: number; name?: string; platform?: string
+    value?: number; code?: string; imageUrl?: string
+  }
+  if (!userId || !name || !code || !value) {
+    res.status(400).json({ ok: false, error: 'userId, name, code e value são obrigatórios.' })
+    return
+  }
+  try {
+    await ensureGiftCardsTable()
+    const [result] = await pool.query<ResultSetHeader>(
+      'INSERT INTO gift_cards (user_id, name, platform, value, code, image_url) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, name, platform ?? null, value, code, imageUrl ?? null]
+    )
+    res.status(201).json({ ok: true, id: (result as any).insertId })
+  } catch (err) {
+    console.error('[giftcard-create]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao criar gift card.' })
+  }
+})
+
+// PATCH /api/admin/shop/giftcards/:id/usado — marcar como usado
+app.patch('/api/admin/shop/giftcards/:id/usado', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
+  const id = Number(req.params.id)
+  await pool.query('UPDATE gift_cards SET status = "usado" WHERE id = ?', [id])
+  res.json({ ok: true })
 })
 
 // ─── 404 — rota não encontrada ───────────────────────────────────────────────
