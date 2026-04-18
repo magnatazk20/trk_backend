@@ -273,6 +273,15 @@ const ensureTelegramConfigTable = async () => {
     catch {
         // coluna já existe
     }
+    try {
+        await db_1.default.query(`
+      ALTER TABLE system_telegram_config
+      ADD COLUMN logs_group_id VARCHAR(255) NOT NULL DEFAULT ''
+      `);
+    }
+    catch {
+        // coluna já existe
+    }
     await db_1.default.query(`
     INSERT IGNORE INTO system_telegram_config (
       singleton_key,
@@ -375,6 +384,47 @@ const ensureTelegramConnectedSync = async () => {
     }
 };
 const normalizePhoneForCompare = (value) => String(value ?? '').replace(/\D/g, '');
+const ensureWithdrawActivationTokensTable = async () => {
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS withdraw_activation_tokens (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      token VARCHAR(64) NOT NULL,
+      status ENUM('pending','activated','expired') NOT NULL DEFAULT 'pending',
+      telegram_user_id VARCHAR(80) NULL,
+      activated_chat_id VARCHAR(80) NULL,
+      activated_at DATETIME NULL,
+      expires_at DATETIME NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_withdraw_activation_tokens_token (token),
+      KEY idx_withdraw_activation_tokens_user (user_id),
+      KEY idx_withdraw_activation_tokens_status (status),
+      KEY idx_withdraw_activation_tokens_expires_at (expires_at)
+    )
+    `);
+};
+const createWithdrawActivationToken = async (userId) => {
+    const parsedUserId = Number(userId);
+    if (!parsedUserId || Number.isNaN(parsedUserId)) {
+        throw new Error('ID de usuário inválido para gerar token.');
+    }
+    await ensureWithdrawActivationTokensTable();
+    const token = crypto_1.default.randomBytes(8).toString('hex').slice(0, 16);
+    await db_1.default.query(`
+    UPDATE withdraw_activation_tokens
+    SET status = 'expired', updated_at = NOW()
+    WHERE user_id = ?
+      AND status = 'pending'
+    `, [parsedUserId]);
+    await db_1.default.query(`
+    INSERT INTO withdraw_activation_tokens
+    (user_id, token, status, expires_at)
+    VALUES (?, ?, 'pending', DATE_ADD(NOW(), INTERVAL 30 MINUTE))
+    `, [parsedUserId, token]);
+    return token;
+};
 const sendTelegramMessage = async (botToken, chatId, text, options) => {
     if (!botToken || !chatId)
         return;
@@ -389,11 +439,33 @@ const sendTelegramMessage = async (botToken, chatId, text, options) => {
                 text,
                 ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
                 ...(options?.parseMode ? { parse_mode: options.parseMode } : {}),
+                ...(Number.isInteger(options?.replyToMessageId)
+                    ? { reply_to_message_id: Number(options?.replyToMessageId), allow_sending_without_reply: true }
+                    : {}),
             }),
         });
     }
     catch (err) {
         console.error('[telegram-send-message]', err);
+    }
+};
+// Envia mensagem para o grupo de logs configurado no banco
+const sendTelegramLog = async (text) => {
+    try {
+        const [rows] = await db_1.default.query(`SELECT bot_token AS botToken, logs_group_id AS logsGroupId
+       FROM system_telegram_config
+       WHERE TRIM(bot_token) <> '' AND TRIM(COALESCE(logs_group_id,'')) <> ''
+       LIMIT 1`);
+        if (!rows.length)
+            return;
+        const botToken = String(rows[0].botToken ?? '');
+        const logsGroupId = String(rows[0].logsGroupId ?? '');
+        if (!botToken || !logsGroupId)
+            return;
+        await sendTelegramMessage(botToken, logsGroupId, text, { parseMode: 'HTML' });
+    }
+    catch (err) {
+        console.error('[telegram-log]', err);
     }
 };
 const claimCheckinForUser = async (userId) => {
@@ -579,6 +651,9 @@ const processTelegramUpdates = async () => {
             const chatId = String(message?.chat?.id ?? '').trim();
             const chatType = String(message?.chat?.type ?? '').trim().toLowerCase();
             const messageId = Number(message?.message_id ?? 0);
+            const telegramReplyOptions = Number.isInteger(messageId) && messageId > 0
+                ? { replyToMessageId: messageId }
+                : undefined;
             const telegramUserId = String(message?.from?.id ?? '').trim();
             const telegramUsername = String(message?.from?.username ?? '').trim() || null;
             const telegramFirstName = String(message?.from?.first_name ?? '').trim() || null;
@@ -641,6 +716,73 @@ const processTelegramUpdates = async () => {
                 const normalizedCommandText = textLower.replace(/\s+/g, '');
                 const isCheckinCommand = normalizedCommandText === '/checkin' ||
                     normalizedCommandText.startsWith('/checkin@');
+                const activationMatch = textRaw.match(/^Ative o saque para mim:\s*([a-z0-9]{16})$/i);
+                if (activationMatch) {
+                    const tokenCandidate = String(activationMatch[1] ?? '').trim().toLowerCase();
+                    await ensureWithdrawActivationTokensTable();
+                    const [tokenRows] = await db_1.default.query(`
+            SELECT
+              id,
+              user_id AS userId,
+              status,
+              expires_at AS expiresAt
+            FROM withdraw_activation_tokens
+            WHERE token = ?
+            LIMIT 1
+            FOR UPDATE
+            `, [tokenCandidate]);
+                    if (tokenRows.length === 0) {
+                        await sendTelegramMessage(botToken, chatId, 'Token de ativação inválido.', telegramReplyOptions);
+                        continue;
+                    }
+                    const tokenRow = tokenRows[0];
+                    const tokenId = Number(tokenRow.id ?? 0);
+                    const tokenUserId = Number(tokenRow.userId ?? 0);
+                    const tokenStatus = String(tokenRow.status ?? 'pending').toLowerCase();
+                    const expiresAt = tokenRow.expiresAt ? new Date(tokenRow.expiresAt) : null;
+                    if (tokenStatus !== 'pending') {
+                        await sendTelegramMessage(botToken, chatId, 'Este token já foi utilizado ou expirou.', telegramReplyOptions);
+                        continue;
+                    }
+                    if (!expiresAt || expiresAt.getTime() < Date.now()) {
+                        await db_1.default.query(`
+              UPDATE withdraw_activation_tokens
+              SET status = 'expired', updated_at = NOW()
+              WHERE id = ?
+              `, [tokenId]);
+                        await sendTelegramMessage(botToken, chatId, 'Token expirado. Gere um novo token no app.', telegramReplyOptions);
+                        continue;
+                    }
+                    const [connectionRows] = await db_1.default.query(`
+            SELECT user_id AS userId
+            FROM user_telegram_connections
+            WHERE telegram_user_id = ?
+              AND COALESCE(is_connected, 1) = 1
+            ORDER BY id DESC
+            LIMIT 1
+            `, [telegramUserId]);
+                    if (connectionRows.length === 0) {
+                        await sendTelegramMessage(botToken, chatId, 'Você precisa vincular sua conta primeiro no privado do bot.', telegramReplyOptions);
+                        continue;
+                    }
+                    const linkedUserId = Number(connectionRows[0].userId ?? 0);
+                    if (linkedUserId !== tokenUserId) {
+                        await sendTelegramMessage(botToken, chatId, 'Este token não pertence à sua conta.', telegramReplyOptions);
+                        continue;
+                    }
+                    await db_1.default.query(`
+            UPDATE withdraw_activation_tokens
+            SET
+              status = 'activated',
+              telegram_user_id = ?,
+              activated_chat_id = ?,
+              activated_at = NOW(),
+              updated_at = NOW()
+            WHERE id = ?
+            `, [telegramUserId, chatId, tokenId]);
+                    await sendTelegramMessage(botToken, chatId, '✅ Saque ativado com sucesso para sua conta.', telegramReplyOptions);
+                    continue;
+                }
                 if (!isCheckinCommand) {
                     continue;
                 }
@@ -667,13 +809,16 @@ const processTelegramUpdates = async () => {
                     const botUsername = String(meData?.result?.username ?? '').trim();
                     const botButtonLabel = botUsername ? `@${botUsername}` : 'Vincular conta';
                     const botUrl = botUsername ? `https://t.me/${botUsername}` : undefined;
-                    await sendTelegramMessage(botToken, chatId, `⚠️ Lembrete ${usernameValue} Você ainda não vinculou sua conta PGLM e não pode receber recompensas de check-in! Clique no botão abaixo para vincular`, botUrl
-                        ? {
-                            replyMarkup: {
-                                inline_keyboard: [[{ text: botButtonLabel, url: botUrl }]],
-                            },
-                        }
-                        : undefined);
+                    await sendTelegramMessage(botToken, chatId, `⚠️ Lembrete ${usernameValue} Você ainda não vinculou sua conta PGLM e não pode receber recompensas de check-in! Clique no botão abaixo para vincular`, {
+                        ...(botUrl
+                            ? {
+                                replyMarkup: {
+                                    inline_keyboard: [[{ text: botButtonLabel, url: botUrl }]],
+                                },
+                            }
+                            : {}),
+                        ...(telegramReplyOptions ?? {}),
+                    });
                     continue;
                 }
                 const linkedUserId = Number(connectionRows[0].userId ?? 0);
@@ -693,7 +838,7 @@ const processTelegramUpdates = async () => {
                 const errorMessage = alreadyClaimed
                     ? interpolateTelegramTemplate(configuredCheckinAlreadyClaimedMessage)
                     : String(claimResult.error ?? 'Não foi possível processar seu check-in.');
-                await sendTelegramMessage(botToken, chatId, claimResult.ok ? successMessage : errorMessage);
+                await sendTelegramMessage(botToken, chatId, claimResult.ok ? successMessage : errorMessage, telegramReplyOptions);
                 continue;
             }
             if (chatType !== 'private') {
@@ -707,13 +852,13 @@ const processTelegramUpdates = async () => {
                     await sendTelegramMessage(botToken, chatId, welcomeMessage);
                 }
                 else {
-                    await sendTelegramMessage(botToken, chatId, 'Mensagem de boas-vindas não configurada. Peça ao administrador para configurar em /adf/telegram-config.');
+                    await sendTelegramMessage(botToken, chatId, 'Mensagem de boas-vindas não configurada. Peça ao administrador para configurar em /adf/telegram-config.', telegramReplyOptions);
                 }
                 continue;
             }
             const normalizedIncomingPhone = normalizePhoneForCompare(textRaw);
             if (!normalizedIncomingPhone) {
-                await sendTelegramMessage(botToken, chatId, 'Para conectar sua conta, envie APENAS o telefone cadastrado na plataforma (somente no privado do bot). Exemplo: 11999998888');
+                await sendTelegramMessage(botToken, chatId, 'Para conectar sua conta, envie APENAS o telefone cadastrado na plataforma (somente no privado do bot). Exemplo: 11999998888', telegramReplyOptions);
                 continue;
             }
             const [userRows] = await db_1.default.query(`
@@ -723,7 +868,7 @@ const processTelegramUpdates = async () => {
         LIMIT 1
         `, [normalizedIncomingPhone]);
             if (userRows.length === 0) {
-                await sendTelegramMessage(botToken, chatId, 'Telefone não encontrado. Envie o telefone exatamente como cadastrado.');
+                await sendTelegramMessage(botToken, chatId, 'Telefone não encontrado. Envie o telefone exatamente como cadastrado.', telegramReplyOptions);
                 continue;
             }
             const userId = Number(userRows[0].id);
@@ -737,7 +882,7 @@ const processTelegramUpdates = async () => {
         LIMIT 1
         `, [chatId, telegramUserId]);
             if (existingByChatOrTelegramUserRows.length > 0) {
-                await sendTelegramMessage(botToken, chatId, duplicateConnectionMessage);
+                await sendTelegramMessage(botToken, chatId, duplicateConnectionMessage, telegramReplyOptions);
                 continue;
             }
             const [existingByPhoneRows] = await db_1.default.query(`
@@ -754,7 +899,7 @@ const processTelegramUpdates = async () => {
           WHERE id = ?
              OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') = ?
           `, [userId, normalizedIncomingPhone]);
-                await sendTelegramMessage(botToken, chatId, duplicateConnectionMessage);
+                await sendTelegramMessage(botToken, chatId, duplicateConnectionMessage, telegramReplyOptions);
                 continue;
             }
             const conn = await db_1.default.getConnection();
@@ -774,7 +919,7 @@ const processTelegramUpdates = async () => {
             WHERE id = ?
             `, [userId]);
                     await conn.commit();
-                    await sendTelegramMessage(botToken, chatId, duplicateConnectionMessage);
+                    await sendTelegramMessage(botToken, chatId, duplicateConnectionMessage, telegramReplyOptions);
                     continue;
                 }
                 await conn.query(`
@@ -812,7 +957,7 @@ const processTelegramUpdates = async () => {
                 const affectedRows = Number(updateUserResult?.affectedRows ?? 0);
                 if (affectedRows <= 0) {
                     await conn.rollback();
-                    await sendTelegramMessage(botToken, chatId, 'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.');
+                    await sendTelegramMessage(botToken, chatId, 'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.', telegramReplyOptions);
                     continue;
                 }
                 const [confirmTelegramFlagRows] = await conn.query(`
@@ -837,7 +982,7 @@ const processTelegramUpdates = async () => {
             catch (txErr) {
                 await conn.rollback();
                 console.error('[telegram-link-transaction]', txErr);
-                await sendTelegramMessage(botToken, chatId, 'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.');
+                await sendTelegramMessage(botToken, chatId, 'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.', telegramReplyOptions);
                 continue;
             }
             finally {
@@ -866,7 +1011,7 @@ const processTelegramUpdates = async () => {
                     chatId,
                     telegramUserId,
                 });
-                await sendTelegramMessage(botToken, chatId, 'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.');
+                await sendTelegramMessage(botToken, chatId, 'Não foi possível concluir o vínculo da conta. Tente novamente mais tarde.', telegramReplyOptions);
                 continue;
             }
             // 🔧 CHECK FINAL: confirma que é conexão NOVA (não duplicada)
@@ -884,7 +1029,7 @@ const processTelegramUpdates = async () => {
                     telegramUserId,
                     totalConnections: existingConnections
                 });
-                await sendTelegramMessage(botToken, chatId, '❌ Esta conta já possui conexão ativa com o Telegram.');
+                await sendTelegramMessage(botToken, chatId, '❌ Esta conta já possui conexão ativa com o Telegram.', telegramReplyOptions);
                 continue;
             }
             console.info('[telegram-link-success-confirmed]', {
@@ -901,7 +1046,7 @@ const processTelegramUpdates = async () => {
                 telegramUserId,
                 connectedAt: new Date().toISOString(),
             });
-            await sendTelegramMessage(botToken, chatId, privateLinkSuccessMessage);
+            await sendTelegramMessage(botToken, chatId, privateLinkSuccessMessage, telegramReplyOptions);
         }
     }
     catch (err) {
@@ -947,7 +1092,7 @@ const settleExpiredCyclesForUser = async (userId) => {
         await ensureGiftCodeTables();
         await conn.beginTransaction();
         const [expiredRows] = await conn.query(`
-      SELECT id, expected_profit AS expectedProfit
+      SELECT id, expected_profit AS expectedProfit, amount_paid AS amountPaid
       FROM user_cycle_purchases
       WHERE user_id = ?
         AND status = 'active'
@@ -959,22 +1104,34 @@ const settleExpiredCyclesForUser = async (userId) => {
             await conn.commit();
             return;
         }
+        const [userRows] = await conn.query('SELECT balance FROM users WHERE id = ? LIMIT 1 FOR UPDATE', [userId]);
+        if (userRows.length === 0) {
+            await conn.rollback();
+            return;
+        }
         let totalProfit = 0;
+        let totalCapitalReturn = 0;
         const purchaseIds = [];
         for (const row of expiredRows) {
             const purchaseId = Number(row.id);
             const profit = Number(row.expectedProfit ?? 0);
+            const capital = Number(row.amountPaid ?? 0);
             if (purchaseId > 0)
                 purchaseIds.push(purchaseId);
             if (profit > 0)
                 totalProfit += profit;
+            if (capital > 0)
+                totalCapitalReturn += capital;
         }
-        if (totalProfit > 0) {
+        // Total a creditar = lucro + devolução do capital investido
+        const totalCredit = Number((totalProfit + totalCapitalReturn).toFixed(2));
+        const oldBalance = Number(userRows[0].balance ?? 0);
+        if (totalCredit > 0) {
             await conn.query(`
         UPDATE users
         SET balance = COALESCE(balance, 0) + ?
         WHERE id = ?
-        `, [Number(totalProfit.toFixed(2)), userId]);
+        `, [totalCredit, userId]);
         }
         if (purchaseIds.length > 0) {
             await conn.query(`
@@ -985,6 +1142,62 @@ const settleExpiredCyclesForUser = async (userId) => {
           AND ends_at IS NOT NULL
           AND ends_at <= NOW()
         `, [userId]);
+        }
+        const [updatedRows] = await conn.query('SELECT balance FROM users WHERE id = ? LIMIT 1', [userId]);
+        const newBalance = Number(updatedRows[0]?.balance ?? oldBalance);
+        if (purchaseIds.length > 0 && totalCredit > 0) {
+            await conn.query(`
+        CREATE TABLE IF NOT EXISTS logs (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          user_id BIGINT UNSIGNED NULL,
+          entity_type VARCHAR(60) NOT NULL,
+          entity_id BIGINT UNSIGNED NULL,
+          action VARCHAR(100) NOT NULL,
+          old_balance DECIMAL(12,2) NULL,
+          new_balance DECIMAL(12,2) NULL,
+          amount DECIMAL(12,2) NULL,
+          metadata JSON NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          KEY idx_logs_user_id (user_id),
+          KEY idx_logs_entity_type (entity_type),
+          KEY idx_logs_entity_id (entity_id),
+          KEY idx_logs_action (action),
+          KEY idx_logs_created_at (created_at)
+        )
+        `);
+            const lastPurchaseId = purchaseIds[purchaseIds.length - 1] ?? null;
+            await conn.query(`
+        INSERT INTO logs
+        (
+          user_id,
+          entity_type,
+          entity_id,
+          action,
+          old_balance,
+          new_balance,
+          amount,
+          metadata
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+                userId,
+                'cycle',
+                lastPurchaseId,
+                'cycle_investment_completed_auto_credit',
+                Number(oldBalance.toFixed(2)),
+                Number(newBalance.toFixed(2)),
+                totalCredit,
+                JSON.stringify({
+                    purchaseIds,
+                    completedCount: purchaseIds.length,
+                    totalProfit: Number(totalProfit.toFixed(2)),
+                    totalCapitalReturn: Number(totalCapitalReturn.toFixed(2)),
+                    totalCredit,
+                    previousBalance: Number(oldBalance.toFixed(2)),
+                    currentBalance: Number(newBalance.toFixed(2)),
+                }),
+            ]);
         }
         await conn.commit();
     }
@@ -998,6 +1211,141 @@ const settleExpiredCyclesForUser = async (userId) => {
 };
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
+// ─── Log de todas as requisições HTTP ────────────────────────────────────────
+app.use((req, res, next) => {
+    const startedAt = Date.now();
+    const requestId = Math.random().toString(36).slice(2, 10);
+    console.log(`[http] -> ${requestId} ${req.method} ${req.originalUrl}`);
+    res.on('finish', () => {
+        const ms = Date.now() - startedAt;
+        const level = res.statusCode >= 500 ? 'ERROR' : res.statusCode >= 400 ? 'WARN' : 'INFO';
+        console.log(`[http] [${level}] <- ${requestId} ${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms`);
+    });
+    next();
+});
+// ─── Headers de segurança HTTP ───────────────────────────────────────────────
+app.use((_req, res, next) => {
+    // Impede carregamento em iframes (clickjacking)
+    res.setHeader('X-Frame-Options', 'DENY');
+    // Impede sniffing de content-type
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // Força HTTPS em browsers modernos (1 ano)
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    // Bloqueia scripts/recursos não autorizados (XSS)
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none';");
+    // Esconde tecnologia do servidor
+    res.removeHeader('X-Powered-By');
+    next();
+});
+const rateLimitStore = new Map();
+// Limpa entradas expiradas a cada 5 minutos para evitar vazamento de memória
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of rateLimitStore.entries()) {
+        if (now > entry.resetAt)
+            rateLimitStore.delete(key);
+    }
+}, 5 * 60 * 1000);
+const createRateLimiter = (maxRequests, windowMs, message) => {
+    return (req, res, next) => {
+        const ip = String(req.ip ?? req.socket?.remoteAddress ?? 'unknown');
+        const key = `${ip}:${req.path}`;
+        const now = Date.now();
+        const entry = rateLimitStore.get(key);
+        if (!entry || now > entry.resetAt) {
+            rateLimitStore.set(key, { count: 1, resetAt: now + windowMs });
+            next();
+            return;
+        }
+        entry.count += 1;
+        if (entry.count > maxRequests) {
+            const retryAfterSec = Math.ceil((entry.resetAt - now) / 1000);
+            res.setHeader('Retry-After', String(retryAfterSec));
+            res.status(429).json({
+                ok: false,
+                error: message ?? 'Muitas requisições. Aguarde alguns segundos e tente novamente.',
+            });
+            return;
+        }
+        next();
+    };
+};
+// Limitadores específicos por rota
+const redeemCodeLimiter = createRateLimiter(5, 60000, 'Limite de resgates atingido. Aguarde 1 minuto.');
+const spinLimiter = createRateLimiter(10, 60000, 'Limite de giros atingido. Aguarde 1 minuto.');
+const authLimiter = createRateLimiter(10, 60000, 'Muitas tentativas de login. Aguarde 1 minuto.');
+const generalApiLimiter = createRateLimiter(120, 60000);
+// ─── Presença online em tempo real (WebSocket + heartbeat HTTP) ──────────────
+// Mapa: chave (userId ou sessionKey) → timestamp do último ping (ms)
+const onlinePresence = new Map();
+const PRESENCE_TTL_MS = 65000; // 65s — heartbeat a cada 30s, expiração com margem
+// Helper: conta entradas ativas e emite via WebSocket para todos (count + lista de IDs)
+const broadcastOnlineCount = () => {
+    const cutoff = Date.now() - PRESENCE_TTL_MS;
+    let count = 0;
+    const onlineUserIds = [];
+    for (const [key, ts] of onlinePresence.entries()) {
+        if (ts >= cutoff) {
+            count++;
+            const num = Number(key);
+            if (!isNaN(num) && num > 0)
+                onlineUserIds.push(num);
+        }
+    }
+    io.emit('online-count', { onlineCount: count, onlineUserIds });
+    return count;
+};
+// Limpa entradas expiradas a cada 30 segundos e broadcast o novo count
+setInterval(() => {
+    const cutoff = Date.now() - PRESENCE_TTL_MS;
+    let changed = false;
+    for (const [key, ts] of onlinePresence.entries()) {
+        if (ts < cutoff) {
+            onlinePresence.delete(key);
+            changed = true;
+        }
+    }
+    if (changed)
+        broadcastOnlineCount();
+}, 30000);
+// POST /api/presence/heartbeat — chamado pelo frontend a cada 30s
+app.post('/api/presence/heartbeat', (req, res) => {
+    const userId = String(req.body?.userId ?? '').trim();
+    // Só contabiliza usuários logados e cadastrados (com userId numérico válido)
+    if (!userId || userId === '0' || isNaN(Number(userId))) {
+        res.json({ ok: true }); // ignora silenciosamente sessões anônimas
+        return;
+    }
+    const isNew = !onlinePresence.has(userId);
+    onlinePresence.set(userId, Date.now());
+    // Só faz broadcast quando é um novo cliente (evita flood a cada heartbeat renovado)
+    if (isNew)
+        broadcastOnlineCount();
+    res.json({ ok: true });
+});
+// GET /api/presence/online-count — fallback REST (para o primeiro load do admin)
+app.get('/api/presence/online-count', (req, res) => {
+    const cutoff = Date.now() - PRESENCE_TTL_MS;
+    let count = 0;
+    for (const ts of onlinePresence.values()) {
+        if (ts >= cutoff)
+            count++;
+    }
+    res.json({ ok: true, onlineCount: count });
+});
+// GET /api/presence/online-users — retorna lista de userIds atualmente online
+app.get('/api/presence/online-users', (req, res) => {
+    const cutoff = Date.now() - PRESENCE_TTL_MS;
+    const onlineUserIds = [];
+    for (const [key, ts] of onlinePresence.entries()) {
+        if (ts >= cutoff) {
+            const num = Number(key);
+            if (!isNaN(num) && num > 0)
+                onlineUserIds.push(num);
+        }
+    }
+    res.json({ ok: true, onlineUserIds });
+});
 // ─── Referral Commission Levels (priority static routes) ─────────────────────
 app.get('/api/referral/commission-levels/debug', async (_req, res) => {
     try {
@@ -1063,9 +1411,13 @@ const bootstrapDatabase = async () => {
     await ensureUserTelegramConnectionsTable();
     await ensureTelegramConnectedColumn();
     await ensureTelegramConnectedSync();
+    await ensureWithdrawActivationTokensTable();
     await ensureCommissionLevelsTable();
+    await ensureVipAndMiningTables();
     console.log('[bootstrap-database] telegram config e conexões garantidas');
+    console.log('[bootstrap-database] withdraw_activation_tokens table ensured');
     console.log('[bootstrap-database] commission_levels table ensured');
+    console.log('[bootstrap-database] vip/mining tables ensured');
 };
 bootstrapDatabase().catch((err) => {
     console.error('[bootstrap-database]', err);
@@ -1082,7 +1434,388 @@ app.get('/api/health', async (_req, res) => {
     }
 });
 // ─── Register ────────────────────────────────────────────────────────────────
-app.post('/api/auth/register', async (req, res) => {
+const ensureUserRouletteSpinsTable = async () => {
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS user_roulette_spins (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      available_spins INT NOT NULL DEFAULT 0,
+      total_earned INT NOT NULL DEFAULT 0,
+      total_used INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_user_roulette_spins_user_id (user_id),
+      KEY idx_user_roulette_spins_available (available_spins)
+    )
+    `);
+};
+const ensureRouletteCodesTable = async () => {
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS roulette_codes (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      code VARCHAR(120) NOT NULL,
+      reward_label VARCHAR(255) NULL,
+      description TEXT NULL,
+      created_by_user_id BIGINT UNSIGNED NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      max_total_uses INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_roulette_codes_code (code),
+      KEY idx_roulette_codes_active (is_active),
+      KEY idx_roulette_codes_created_by (created_by_user_id)
+    )
+    `);
+    // Garante coluna max_total_uses em tabelas já existentes
+    try {
+        await db_1.default.query(`ALTER TABLE roulette_codes ADD COLUMN max_total_uses INT NOT NULL DEFAULT 0`);
+    }
+    catch { /* coluna já existe */ }
+};
+const DEFAULT_ROULETTE_PROBABILITIES = [
+    { label: '1 BRL', percent: 40, sortOrder: 0 },
+    { label: '16 BRL', percent: 20, sortOrder: 1 },
+    { label: '35 BRL', percent: 14, sortOrder: 2 },
+    { label: '50 BRL', percent: 10, sortOrder: 3 },
+    { label: '73 BRL', percent: 8, sortOrder: 4 },
+    { label: '90 BRL', percent: 5, sortOrder: 5 },
+    { label: '183 BRL', percent: 2, sortOrder: 6 },
+    { label: '16600 BRL', percent: 1, sortOrder: 7 },
+];
+const ensureRouletteProbabilitiesTable = async () => {
+    // Cria a tabela se não existir
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS roulette_probabilities (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      label VARCHAR(120) NOT NULL,
+      percent DECIMAL(8,4) NOT NULL DEFAULT 0.0000,
+      sort_order INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_roulette_probabilities_label (label),
+      KEY idx_roulette_probabilities_sort_order (sort_order)
+    )
+    `);
+    // Só insere os defaults se a tabela estiver vazia (não sobrescreve configurações salvas)
+    const [countRows] = await db_1.default.query('SELECT COUNT(*) AS total FROM roulette_probabilities');
+    const total = Number(countRows[0]?.total ?? 0);
+    if (total === 0) {
+        for (const item of DEFAULT_ROULETTE_PROBABILITIES) {
+            await db_1.default.query(`
+        INSERT IGNORE INTO roulette_probabilities (label, percent, sort_order)
+        VALUES (?, ?, ?)
+        `, [item.label, Number(item.percent.toFixed(4)), item.sortOrder]);
+        }
+    }
+};
+app.get('/api/admin/roulette-probabilities', requireMaxAdmin, async (_req, res) => {
+    try {
+        await ensureRouletteProbabilitiesTable();
+        const [rows] = await db_1.default.query(`
+      SELECT
+        label,
+        percent,
+        sort_order AS sortOrder
+      FROM roulette_probabilities
+      ORDER BY sort_order ASC, id ASC
+      `);
+        const probabilities = rows.map((row) => ({
+            label: String(row.label ?? ''),
+            percent: Number(row.percent ?? 0),
+            sortOrder: Number(row.sortOrder ?? 0),
+        }));
+        res.json({ ok: true, probabilities });
+    }
+    catch (err) {
+        console.error('[admin-roulette-probabilities-get] ERRO:', err);
+        res.status(500).json({ ok: false, error: 'Erro ao carregar probabilidades da roleta.', detail: String(err) });
+    }
+});
+app.put('/api/admin/roulette-probabilities', requireMaxAdmin, async (req, res) => {
+    const payload = req.body;
+    const list = Array.isArray(payload?.probabilities) ? payload.probabilities : [];
+    if (list.length === 0) {
+        res.status(400).json({ ok: false, error: 'Informe a lista de probabilidades.' });
+        return;
+    }
+    const normalized = list.map((item, index) => ({
+        label: String(item?.label ?? '').trim(),
+        percent: Number(String(item?.percent ?? '').replace(',', '.')),
+        sortOrder: index,
+    }));
+    if (normalized.some((item) => !item.label)) {
+        res.status(400).json({ ok: false, error: 'Cada item deve possuir label.' });
+        return;
+    }
+    if (normalized.some((item) => !Number.isFinite(item.percent) || item.percent < 0)) {
+        res.status(400).json({ ok: false, error: 'Todos os percentuais devem ser números válidos >= 0.' });
+        return;
+    }
+    const uniqueLabels = new Set(normalized.map((item) => item.label.toLowerCase()));
+    if (uniqueLabels.size !== normalized.length) {
+        res.status(400).json({ ok: false, error: 'Não é permitido repetir labels na configuração.' });
+        return;
+    }
+    // Garante tabela antes de abrir transação (evita conflito entre pool e conn)
+    await ensureRouletteProbabilitiesTable();
+    const conn = await db_1.default.getConnection();
+    try {
+        await conn.beginTransaction();
+        // Apaga todos e reinsere com os novos valores
+        await conn.query('DELETE FROM roulette_probabilities');
+        for (const item of normalized) {
+            await conn.query(`
+        INSERT INTO roulette_probabilities (label, percent, sort_order)
+        VALUES (?, ?, ?)
+        `, [item.label, Number(item.percent.toFixed(4)), item.sortOrder]);
+        }
+        await conn.commit();
+        res.json({
+            ok: true,
+            message: 'Probabilidades salvas com sucesso.',
+            probabilities: normalized.map((item) => ({
+                label: item.label,
+                percent: Number(item.percent.toFixed(4)),
+                sortOrder: item.sortOrder,
+            })),
+        });
+    }
+    catch (err) {
+        await conn.rollback();
+        console.error('[admin-roulette-probabilities-put] ERRO:', err);
+        res.status(500).json({ ok: false, error: 'Erro ao salvar probabilidades da roleta.', detail: String(err) });
+    }
+    finally {
+        conn.release();
+    }
+});
+app.get('/api/admin/roulette-codes', requireMaxAdmin, async (_req, res) => {
+    try {
+        await ensureRouletteCodesTable();
+        const [rows] = await db_1.default.query(`
+      SELECT
+        rc.id,
+        rc.code,
+        rc.reward_label AS reward,
+        rc.description,
+        rc.is_active AS isActive,
+        rc.max_total_uses AS maxTotalUses,
+        rc.created_by_user_id AS createdByUserId,
+        rc.created_at AS createdAt,
+        COUNT(rcr.id) AS redeemedCount
+      FROM roulette_codes rc
+      LEFT JOIN roulette_code_redemptions rcr ON rcr.roulette_code_id = rc.id
+      GROUP BY rc.id
+      ORDER BY rc.id DESC
+      `);
+        const rouletteCodes = rows.map((row) => ({
+            id: Number(row.id ?? 0),
+            code: String(row.code ?? ''),
+            reward: String(row.reward ?? ''),
+            description: String(row.description ?? ''),
+            isActive: Number(row.isActive ?? 1) === 1,
+            maxTotalUses: Number(row.maxTotalUses ?? 0),
+            redeemedCount: Number(row.redeemedCount ?? 0),
+            isRedeemed: Number(row.redeemedCount ?? 0) > 0,
+            createdByUserId: row.createdByUserId == null ? null : Number(row.createdByUserId),
+            createdAt: row.createdAt ?? null,
+        }));
+        res.json({ ok: true, rouletteCodes });
+    }
+    catch (err) {
+        console.error('[admin-roulette-codes-list]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao listar códigos da roleta.' });
+    }
+});
+app.post('/api/admin/roulette-codes', requireMaxAdmin, async (req, res) => {
+    const { code, reward, description, maxTotalUses } = req.body;
+    const normalizedCode = String(code ?? '').trim().toUpperCase();
+    const normalizedReward = String(reward ?? '').trim();
+    const normalizedDescription = String(description ?? '').trim();
+    const parsedMaxTotalUses = Math.max(0, Math.floor(Number(String(maxTotalUses ?? '0').replace(',', '.')) || 0));
+    if (!normalizedCode) {
+        res.status(400).json({ ok: false, error: 'Informe um código para a roleta.' });
+        return;
+    }
+    try {
+        await ensureRouletteCodesTable();
+        const [result] = await db_1.default.query(`
+      INSERT INTO roulette_codes
+      (code, reward_label, description, created_by_user_id, is_active, max_total_uses)
+      VALUES (?, ?, ?, ?, 1, ?)
+      `, [
+            normalizedCode,
+            normalizedReward || null,
+            normalizedDescription || null,
+            Number(req.authUser?.id ?? 0) || null,
+            parsedMaxTotalUses,
+        ]);
+        res.status(201).json({
+            ok: true,
+            message: `Código "${normalizedCode}" criado com sucesso.`,
+            rouletteCode: {
+                id: Number(result?.insertId ?? 0),
+                code: normalizedCode,
+                reward: normalizedReward,
+                description: normalizedDescription,
+                maxTotalUses: parsedMaxTotalUses,
+            },
+        });
+    }
+    catch (err) {
+        if (String(err?.code ?? '') === 'ER_DUP_ENTRY') {
+            res.status(409).json({ ok: false, error: 'Este código da roleta já existe.' });
+            return;
+        }
+        console.error('[admin-roulette-codes-create]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao criar código da roleta.' });
+    }
+});
+app.delete('/api/admin/roulette-codes/:id', requireMaxAdmin, async (req, res) => {
+    const codeId = Number(req.params.id);
+    if (!codeId || Number.isNaN(codeId)) {
+        res.status(400).json({ ok: false, error: 'ID inválido.' });
+        return;
+    }
+    try {
+        await ensureRouletteCodesTable();
+        const [rows] = await db_1.default.query('SELECT id, code FROM roulette_codes WHERE id = ? LIMIT 1', [codeId]);
+        if (rows.length === 0) {
+            res.status(404).json({ ok: false, error: 'Código não encontrado.' });
+            return;
+        }
+        await db_1.default.query('DELETE FROM roulette_codes WHERE id = ?', [codeId]);
+        res.json({ ok: true, message: `Código "${String(rows[0].code)}" excluído com sucesso.` });
+    }
+    catch (err) {
+        console.error('[admin-roulette-codes-delete]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao excluir código da roleta.' });
+    }
+});
+// ─── Resgatar código de roleta (usuário) ─────────────────────────────────────
+app.post('/api/roleta/redeem-code', redeemCodeLimiter, async (req, res) => {
+    const { userId, code } = req.body;
+    const parsedUserId = Number(userId);
+    const normalizedCode = String(code ?? '').trim().toUpperCase();
+    if (!parsedUserId || Number.isNaN(parsedUserId)) {
+        res.status(400).json({ ok: false, error: 'ID de usuário inválido.' });
+        return;
+    }
+    if (!normalizedCode) {
+        res.status(400).json({ ok: false, error: 'Código inválido.' });
+        return;
+    }
+    try {
+        await ensureRouletteCodesTable();
+        // Garante tabela de resgates
+        await db_1.default.query(`
+      CREATE TABLE IF NOT EXISTS roulette_code_redemptions (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        roulette_code_id BIGINT UNSIGNED NOT NULL,
+        user_id BIGINT UNSIGNED NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_rcr_code_user (roulette_code_id, user_id),
+        KEY idx_rcr_user_id (user_id),
+        KEY idx_rcr_code_id (roulette_code_id)
+      )
+    `);
+        // Busca o código
+        const [codeRows] = await db_1.default.query(`SELECT id, code, reward_label, is_active, max_total_uses FROM roulette_codes WHERE code = ? LIMIT 1`, [normalizedCode]);
+        if (codeRows.length === 0) {
+            res.status(404).json({ ok: false, error: 'Código não encontrado ou inválido.' });
+            sendTelegramLog(`❌ <b>Falha no Resgate</b>\n` +
+                `👤 Usuário ID: <code>${parsedUserId}</code>\n` +
+                `🎟️ Código: <code>${normalizedCode}</code>\n` +
+                `⚠️ Motivo: Código não encontrado\n` +
+                `📅 ${new Date().toLocaleString('pt-BR')}`).catch(() => { });
+            return;
+        }
+        const codeData = codeRows[0];
+        if (!Number(codeData.is_active ?? 1)) {
+            res.status(400).json({ ok: false, error: 'Este código está inativo.' });
+            sendTelegramLog(`❌ <b>Falha no Resgate</b>\n` +
+                `👤 Usuário ID: <code>${parsedUserId}</code>\n` +
+                `🎟️ Código: <code>${normalizedCode}</code>\n` +
+                `⚠️ Motivo: Código inativo\n` +
+                `📅 ${new Date().toLocaleString('pt-BR')}`).catch(() => { });
+            return;
+        }
+        // Verifica se o usuário já resgatou este código
+        const [alreadyRows] = await db_1.default.query('SELECT id FROM roulette_code_redemptions WHERE roulette_code_id = ? AND user_id = ? LIMIT 1', [Number(codeData.id), parsedUserId]);
+        if (alreadyRows.length > 0) {
+            res.status(409).json({ ok: false, error: 'Você já resgatou este código.' });
+            sendTelegramLog(`❌ <b>Falha no Resgate</b>\n` +
+                `👤 Usuário ID: <code>${parsedUserId}</code>\n` +
+                `🎟️ Código: <code>${normalizedCode}</code>\n` +
+                `⚠️ Motivo: Usuário já resgatou este código\n` +
+                `📅 ${new Date().toLocaleString('pt-BR')}`).catch(() => { });
+            return;
+        }
+        // Verifica limite total de usos (0 = ilimitado)
+        const maxTotalUses = Number(codeData.max_total_uses ?? 0);
+        if (maxTotalUses > 0) {
+            const [countRows] = await db_1.default.query('SELECT COUNT(*) AS total FROM roulette_code_redemptions WHERE roulette_code_id = ?', [Number(codeData.id)]);
+            const usedCount = Number(countRows[0]?.total ?? 0);
+            if (usedCount >= maxTotalUses) {
+                res.status(400).json({ ok: false, error: 'Este código já atingiu o limite máximo de usos.' });
+                sendTelegramLog(`❌ <b>Falha no Resgate</b>\n` +
+                    `👤 Usuário ID: <code>${parsedUserId}</code>\n` +
+                    `🎟️ Código: <code>${normalizedCode}</code>\n` +
+                    `⚠️ Motivo: Limite máximo de usos atingido (${usedCount}/${maxTotalUses})\n` +
+                    `📅 ${new Date().toLocaleString('pt-BR')}`).catch(() => { });
+                return;
+            }
+        }
+        // Define quantos giros conceder: reward_label numérico = quantidade de giros (padrão: 1)
+        const rewardLabel = String(codeData.reward_label ?? '').trim();
+        const spinsToAdd = Math.max(1, Number(rewardLabel) || 1);
+        // Registra o resgate
+        await db_1.default.query('INSERT INTO roulette_code_redemptions (roulette_code_id, user_id) VALUES (?, ?)', [Number(codeData.id), parsedUserId]);
+        // Concede os giros ao usuário
+        await ensureUserRouletteSpinsTable();
+        await db_1.default.query(`
+      INSERT INTO user_roulette_spins (user_id, available_spins, total_earned, total_used)
+      VALUES (?, ?, ?, 0)
+      ON DUPLICATE KEY UPDATE
+        available_spins = COALESCE(available_spins, 0) + ?,
+        total_earned = COALESCE(total_earned, 0) + ?,
+        updated_at = NOW()
+      `, [parsedUserId, spinsToAdd, spinsToAdd, spinsToAdd, spinsToAdd]);
+        // Busca giros disponíveis atualizados
+        const [spinsRows] = await db_1.default.query('SELECT available_spins AS availableSpins FROM user_roulette_spins WHERE user_id = ? LIMIT 1', [parsedUserId]);
+        const availableSpins = Number(spinsRows[0]?.availableSpins ?? spinsToAdd);
+        res.json({
+            ok: true,
+            message: `Código resgatado com sucesso! Você recebeu ${spinsToAdd} giro${spinsToAdd > 1 ? 's' : ''} na roleta.`,
+            spinsAdded: spinsToAdd,
+            availableSpins,
+        });
+        // Log de resgate bem-sucedido (fire-and-forget)
+        sendTelegramLog(`✅ <b>Código Resgatado</b>\n` +
+            `👤 Usuário ID: <code>${parsedUserId}</code>\n` +
+            `🎟️ Código: <code>${normalizedCode}</code>\n` +
+            `🎰 Giros concedidos: <b>${spinsToAdd}</b>\n` +
+            `📅 ${new Date().toLocaleString('pt-BR')}`).catch(() => { });
+    }
+    catch (err) {
+        if (String(err?.code ?? '') === 'ER_DUP_ENTRY') {
+            res.status(409).json({ ok: false, error: 'Você já resgatou este código.' });
+            sendTelegramLog(`❌ <b>Falha no Resgate (código duplicado)</b>\n` +
+                `👤 Usuário ID: <code>${parsedUserId}</code>\n` +
+                `🎟️ Código: <code>${normalizedCode}</code>\n` +
+                `⚠️ Motivo: Usuário já resgatou este código\n` +
+                `📅 ${new Date().toLocaleString('pt-BR')}`).catch(() => { });
+            return;
+        }
+        console.error('[roleta-redeem-code]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao resgatar código da roleta.' });
+    }
+});
+app.post('/api/auth/register', authLimiter, async (req, res) => {
     const { name, phone, password, referralCode } = req.body;
     if (!name || !phone || !password) {
         res.status(400).json({ error: 'Nome, telefone e senha são obrigatórios.' });
@@ -1112,6 +1845,8 @@ app.post('/api/auth/register', async (req, res) => {
         // Inserir usuário com referral próprio
         const [result] = await db_1.default.query('INSERT INTO users (name, phone, password, referral_code, referred_by_user_id) VALUES (?, ?, ?, ?, ?)', [name, phone, hash, userReferralCode, referredByUserId]);
         const userId = result.insertId;
+        // Giro da roleta NÃO é concedido no cadastro.
+        // O giro só é concedido quando o indicado (nível 1) fizer o primeiro depósito.
         // Gerar JWT
         const token = jsonwebtoken_1.default.sign({ id: userId, phone }, JWT_SECRET, {
             expiresIn: JWT_EXPIRES,
@@ -1135,7 +1870,16 @@ app.get('/api/user/summary/:id', async (req, res) => {
         return;
     }
     try {
-        const [rows] = await db_1.default.query('SELECT balance, total_deposits FROM users WHERE id = ?', [userId]);
+        try {
+            await db_1.default.query(`
+        ALTER TABLE users
+        ADD COLUMN monthly_salary_contract VARCHAR(255) NULL
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        const [rows] = await db_1.default.query('SELECT balance, total_deposits, monthly_salary_contract AS monthlySalaryContract FROM users WHERE id = ?', [userId]);
         if (rows.length === 0) {
             res.status(404).json({ error: 'Usuário não encontrado.' });
             return;
@@ -1144,6 +1888,7 @@ app.get('/api/user/summary/:id', async (req, res) => {
         res.json({
             balance: Number(row.balance ?? 0),
             totalDeposits: Number(row.total_deposits ?? 0),
+            monthlySalaryContract: row.monthlySalaryContract == null ? null : String(row.monthlySalaryContract),
         });
     }
     catch (err) {
@@ -1152,7 +1897,7 @@ app.get('/api/user/summary/:id', async (req, res) => {
     }
 });
 // ─── Login ───────────────────────────────────────────────────────────────────
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authLimiter, async (req, res) => {
     const { phone, password } = req.body;
     if (!phone || !password) {
         res.status(400).json({ error: 'Telefone e senha são obrigatórios.' });
@@ -1348,6 +2093,35 @@ app.post('/api/CASHIN/webhook', express_1.default.raw({ type: '*/*' }), async (r
               total_deposits = COALESCE(total_deposits, 0) + ?
             WHERE id = ?
             `, [Number(existing.amount ?? amountBRL), Number(existing.amount ?? amountBRL), existing.user_id]);
+                    const [depositorRows] = await db_1.default.query(`
+            SELECT referred_by_user_id AS referredByUserId
+            FROM users
+            WHERE id = ?
+            LIMIT 1
+            `, [Number(existing.user_id)]);
+                    const referredByUserId = Number(depositorRows[0]?.referredByUserId ?? 0);
+                    if (referredByUserId > 0) {
+                        // Giro só é concedido no PRIMEIRO depósito do indicado (nível 1)
+                        const [prevDepositsRows] = await db_1.default.query(`
+              SELECT COUNT(*) AS total
+              FROM cashin_payments
+              WHERE user_id = ?
+                AND status IN ('paid', 'payment.paid')
+                AND id != ?
+              `, [Number(existing.user_id), Number(existing.id)]);
+                        const prevDeposits = Number(prevDepositsRows[0]?.total ?? 0);
+                        if (prevDeposits === 0) {
+                            await ensureUserRouletteSpinsTable();
+                            await db_1.default.query(`
+                INSERT INTO user_roulette_spins (user_id, available_spins, total_earned, total_used)
+                VALUES (?, 1, 1, 0)
+                ON DUPLICATE KEY UPDATE
+                  available_spins = COALESCE(available_spins, 0) + 1,
+                  total_earned = COALESCE(total_earned, 0) + 1,
+                  updated_at = NOW()
+                `, [referredByUserId]);
+                        }
+                    }
                     await applyReferralCommissionsForDeposit(Number(existing.id), Number(existing.user_id), Number(existing.amount ?? amountBRL));
                 }
                 res.status(200).send('OK');
@@ -1384,6 +2158,35 @@ app.post('/api/CASHIN/webhook', express_1.default.raw({ type: '*/*' }), async (r
             total_deposits = COALESCE(total_deposits, 0) + ?
           WHERE id = ?
           `, [amountBRL, amountBRL, userId]);
+                const [depositorRows] = await db_1.default.query(`
+          SELECT referred_by_user_id AS referredByUserId
+          FROM users
+          WHERE id = ?
+          LIMIT 1
+          `, [userId]);
+                const referredByUserId = Number(depositorRows[0]?.referredByUserId ?? 0);
+                if (referredByUserId > 0) {
+                    // Giro só é concedido no PRIMEIRO depósito do indicado (nível 1)
+                    const [prevDepositsRows2] = await db_1.default.query(`
+            SELECT COUNT(*) AS total
+            FROM cashin_payments
+            WHERE user_id = ?
+              AND status IN ('paid', 'payment.paid')
+            `, [userId]);
+                    const prevDeposits2 = Number(prevDepositsRows2[0]?.total ?? 0);
+                    // prevDeposits2 === 1 porque o INSERT acima já inseriu este depósito como paid
+                    if (prevDeposits2 <= 1) {
+                        await ensureUserRouletteSpinsTable();
+                        await db_1.default.query(`
+              INSERT INTO user_roulette_spins (user_id, available_spins, total_earned, total_used)
+              VALUES (?, 1, 1, 0)
+              ON DUPLICATE KEY UPDATE
+                available_spins = COALESCE(available_spins, 0) + 1,
+                total_earned = COALESCE(total_earned, 0) + 1,
+                updated_at = NOW()
+              `, [referredByUserId]);
+                    }
+                }
                 const [createdRows] = await db_1.default.query(`
           SELECT id
           FROM cashin_payments
@@ -1404,6 +2207,411 @@ app.post('/api/CASHIN/webhook', express_1.default.raw({ type: '*/*' }), async (r
     }
 });
 // ─── Start ───────────────────────────────────────────────────────────────────
+app.get('/api/monthly-salary-plans', async (_req, res) => {
+    try {
+        await ensureMonthlySalaryPlansTable();
+        const [rows] = await db_1.default.query(`
+      SELECT
+        id,
+        title,
+        image_url AS imageUrl,
+        monthly_salary AS monthlySalary,
+        required_level1_deposited AS requiredLevel1Deposited,
+        required_level2_deposited AS requiredLevel2Deposited,
+        required_level3_deposited AS requiredLevel3Deposited,
+        is_active AS isActive,
+        sort_order AS sortOrder
+      FROM monthly_salary_plans
+      WHERE is_active = 1
+      ORDER BY sort_order ASC, id ASC
+      `);
+        const plans = rows.map((row) => ({
+            id: Number(row.id),
+            title: String(row.title ?? ''),
+            imageUrl: String(row.imageUrl ?? ''),
+            monthlySalary: Number(row.monthlySalary ?? 0),
+            requiredLevel1Deposited: Number(row.requiredLevel1Deposited ?? 0),
+            requiredLevel2Deposited: Number(row.requiredLevel2Deposited ?? 0),
+            requiredLevel3Deposited: Number(row.requiredLevel3Deposited ?? 0),
+            isActive: Number(row.isActive ?? 1) === 1,
+            sortOrder: Number(row.sortOrder ?? 0),
+        }));
+        res.json({ ok: true, plans });
+    }
+    catch (err) {
+        console.error('[monthly-salary-plans-list]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao carregar planos de salário mensal.' });
+    }
+});
+app.get('/api/admin/monthly-salary-plans', requireMaxAdmin, async (_req, res) => {
+    try {
+        await ensureMonthlySalaryPlansTable();
+        const [rows] = await db_1.default.query(`
+      SELECT
+        id,
+        title,
+        image_url AS imageUrl,
+        monthly_salary AS monthlySalary,
+        required_level1_deposited AS requiredLevel1Deposited,
+        required_level2_deposited AS requiredLevel2Deposited,
+        required_level3_deposited AS requiredLevel3Deposited,
+        is_active AS isActive,
+        sort_order AS sortOrder
+      FROM monthly_salary_plans
+      ORDER BY sort_order ASC, id ASC
+      `);
+        const plans = rows.map((row) => ({
+            id: Number(row.id),
+            title: String(row.title ?? ''),
+            imageUrl: String(row.imageUrl ?? ''),
+            monthlySalary: Number(row.monthlySalary ?? 0),
+            requiredLevel1Deposited: Number(row.requiredLevel1Deposited ?? 0),
+            requiredLevel2Deposited: Number(row.requiredLevel2Deposited ?? 0),
+            requiredLevel3Deposited: Number(row.requiredLevel3Deposited ?? 0),
+            isActive: Number(row.isActive ?? 1) === 1,
+            sortOrder: Number(row.sortOrder ?? 0),
+        }));
+        res.json({ ok: true, plans });
+    }
+    catch (err) {
+        console.error('[admin-monthly-salary-plans-list]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao carregar planos de salário mensal.' });
+    }
+});
+app.post('/api/admin/monthly-salary-plans', requireMaxAdmin, async (req, res) => {
+    const { title, imageUrl, monthlySalary, requiredLevel1Deposited, requiredLevel2Deposited, requiredLevel3Deposited, isActive, sortOrder, } = req.body;
+    const parsedTitle = String(title ?? '').trim();
+    const parsedImageUrl = String(imageUrl ?? '').trim();
+    const parsedMonthlySalary = Number(String(monthlySalary ?? '').replace(',', '.'));
+    const parsedL1 = Number(String(requiredLevel1Deposited ?? 0));
+    const parsedL2 = Number(String(requiredLevel2Deposited ?? 0));
+    const parsedL3 = Number(String(requiredLevel3Deposited ?? 0));
+    const parsedSortOrder = Number(String(sortOrder ?? 0));
+    const parsedIsActive = isActive === true || isActive === 1 || String(isActive ?? '').toLowerCase() === 'true' ? 1 : 0;
+    if (!parsedTitle) {
+        res.status(400).json({ ok: false, error: 'Título do plano é obrigatório.' });
+        return;
+    }
+    if (!Number.isFinite(parsedMonthlySalary) || parsedMonthlySalary < 0) {
+        res.status(400).json({ ok: false, error: 'Salário mensal inválido.' });
+        return;
+    }
+    if (!Number.isInteger(parsedL1) || parsedL1 < 0 || !Number.isInteger(parsedL2) || parsedL2 < 0 || !Number.isInteger(parsedL3) || parsedL3 < 0) {
+        res.status(400).json({ ok: false, error: 'Requisitos de níveis inválidos.' });
+        return;
+    }
+    if (!Number.isInteger(parsedSortOrder)) {
+        res.status(400).json({ ok: false, error: 'Ordem inválida.' });
+        return;
+    }
+    try {
+        await ensureMonthlySalaryPlansTable();
+        const [result] = await db_1.default.query(`
+      INSERT INTO monthly_salary_plans
+      (
+        title,
+        image_url,
+        monthly_salary,
+        required_level1_deposited,
+        required_level2_deposited,
+        required_level3_deposited,
+        is_active,
+        sort_order
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [
+            parsedTitle,
+            parsedImageUrl || null,
+            Number(parsedMonthlySalary.toFixed(2)),
+            parsedL1,
+            parsedL2,
+            parsedL3,
+            parsedIsActive,
+            parsedSortOrder,
+        ]);
+        res.status(201).json({
+            ok: true,
+            message: 'Plano criado com sucesso.',
+            plan: {
+                id: Number(result?.insertId ?? 0),
+                title: parsedTitle,
+            },
+        });
+    }
+    catch (err) {
+        console.error('[admin-monthly-salary-plans-create]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao criar plano de salário mensal.' });
+    }
+});
+app.put('/api/admin/monthly-salary-plans/:id', requireMaxAdmin, async (req, res) => {
+    const planId = Number(req.params.id);
+    const { title, imageUrl, monthlySalary, requiredLevel1Deposited, requiredLevel2Deposited, requiredLevel3Deposited, isActive, sortOrder, } = req.body;
+    if (!planId || Number.isNaN(planId)) {
+        res.status(400).json({ ok: false, error: 'ID do plano inválido.' });
+        return;
+    }
+    const parsedTitle = String(title ?? '').trim();
+    const parsedImageUrl = String(imageUrl ?? '').trim();
+    const parsedMonthlySalary = Number(String(monthlySalary ?? '').replace(',', '.'));
+    const parsedL1 = Number(String(requiredLevel1Deposited ?? 0));
+    const parsedL2 = Number(String(requiredLevel2Deposited ?? 0));
+    const parsedL3 = Number(String(requiredLevel3Deposited ?? 0));
+    const parsedSortOrder = Number(String(sortOrder ?? 0));
+    const parsedIsActive = isActive === true || isActive === 1 || String(isActive ?? '').toLowerCase() === 'true' ? 1 : 0;
+    if (!parsedTitle) {
+        res.status(400).json({ ok: false, error: 'Título do plano é obrigatório.' });
+        return;
+    }
+    if (!Number.isFinite(parsedMonthlySalary) || parsedMonthlySalary < 0) {
+        res.status(400).json({ ok: false, error: 'Salário mensal inválido.' });
+        return;
+    }
+    if (!Number.isInteger(parsedL1) || parsedL1 < 0 || !Number.isInteger(parsedL2) || parsedL2 < 0 || !Number.isInteger(parsedL3) || parsedL3 < 0) {
+        res.status(400).json({ ok: false, error: 'Requisitos de níveis inválidos.' });
+        return;
+    }
+    if (!Number.isInteger(parsedSortOrder)) {
+        res.status(400).json({ ok: false, error: 'Ordem inválida.' });
+        return;
+    }
+    try {
+        await ensureMonthlySalaryPlansTable();
+        const [result] = await db_1.default.query(`
+      UPDATE monthly_salary_plans
+      SET
+        title = ?,
+        image_url = ?,
+        monthly_salary = ?,
+        required_level1_deposited = ?,
+        required_level2_deposited = ?,
+        required_level3_deposited = ?,
+        is_active = ?,
+        sort_order = ?,
+        updated_at = NOW()
+      WHERE id = ?
+      `, [
+            parsedTitle,
+            parsedImageUrl || null,
+            Number(parsedMonthlySalary.toFixed(2)),
+            parsedL1,
+            parsedL2,
+            parsedL3,
+            parsedIsActive,
+            parsedSortOrder,
+            planId,
+        ]);
+        if (Number(result?.affectedRows ?? 0) <= 0) {
+            res.status(404).json({ ok: false, error: 'Plano não encontrado.' });
+            return;
+        }
+        res.json({ ok: true, message: 'Plano atualizado com sucesso.' });
+    }
+    catch (err) {
+        console.error('[admin-monthly-salary-plans-update]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao atualizar plano de salário mensal.' });
+    }
+});
+app.delete('/api/admin/monthly-salary-plans/:id', requireMaxAdmin, async (req, res) => {
+    const planId = Number(req.params.id);
+    if (!planId || Number.isNaN(planId)) {
+        res.status(400).json({ ok: false, error: 'ID do plano inválido.' });
+        return;
+    }
+    try {
+        await ensureMonthlySalaryPlansTable();
+        const [result] = await db_1.default.query('DELETE FROM monthly_salary_plans WHERE id = ?', [planId]);
+        if (Number(result?.affectedRows ?? 0) <= 0) {
+            res.status(404).json({ ok: false, error: 'Plano não encontrado.' });
+            return;
+        }
+        res.json({ ok: true, message: 'Plano apagado com sucesso.' });
+    }
+    catch (err) {
+        console.error('[admin-monthly-salary-plans-delete]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao apagar plano de salário mensal.' });
+    }
+});
+app.post('/api/monthly-salary-plans/claim', async (req, res) => {
+    const { userId, planId } = req.body;
+    const parsedUserId = Number(userId);
+    const parsedPlanId = Number(planId);
+    if (!parsedUserId || Number.isNaN(parsedUserId)) {
+        res.status(400).json({ ok: false, error: 'ID de usuário inválido.' });
+        return;
+    }
+    if (!parsedPlanId || Number.isNaN(parsedPlanId)) {
+        res.status(400).json({ ok: false, error: 'ID do plano inválido.' });
+        return;
+    }
+    const conn = await db_1.default.getConnection();
+    try {
+        await conn.beginTransaction();
+        await ensureMonthlySalaryPlansTable();
+        try {
+            await conn.query(`
+        ALTER TABLE users
+        ADD COLUMN monthly_salary_contract VARCHAR(255) NULL
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        const [userRows] = await conn.query(`
+      SELECT id, phone, monthly_salary_contract AS monthlySalaryContract
+      FROM users
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+      `, [parsedUserId]);
+        if (userRows.length === 0) {
+            await conn.rollback();
+            res.status(404).json({ ok: false, error: 'Usuário não encontrado.' });
+            return;
+        }
+        const [planRows] = await conn.query(`
+      SELECT
+        id,
+        title,
+        monthly_salary AS monthlySalary,
+        required_level1_deposited AS requiredLevel1Deposited,
+        required_level2_deposited AS requiredLevel2Deposited,
+        required_level3_deposited AS requiredLevel3Deposited,
+        is_active AS isActive
+      FROM monthly_salary_plans
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+      `, [parsedPlanId]);
+        if (planRows.length === 0 || Number(planRows[0].isActive ?? 0) !== 1) {
+            await conn.rollback();
+            res.status(404).json({ ok: false, error: 'Plano de salário mensal não encontrado ou inativo.' });
+            return;
+        }
+        const plan = planRows[0];
+        const monthlySalaryAmount = Number(plan.monthlySalary ?? 0);
+        const monthlySalaryFormatted = monthlySalaryAmount.toLocaleString('pt-BR', {
+            style: 'currency',
+            currency: 'BRL',
+        });
+        const requiredL1 = Number(plan.requiredLevel1Deposited ?? 0);
+        const requiredL2 = Number(plan.requiredLevel2Deposited ?? 0);
+        const requiredL3 = Number(plan.requiredLevel3Deposited ?? 0);
+        const [refCountRows] = await conn.query(`
+      WITH RECURSIVE referral_tree AS (
+        SELECT
+          u.id,
+          1 AS level
+        FROM users u
+        WHERE u.referred_by_user_id = ?
+
+        UNION ALL
+
+        SELECT
+          u2.id,
+          rt.level + 1 AS level
+        FROM users u2
+        INNER JOIN referral_tree rt ON u2.referred_by_user_id = rt.id
+        WHERE rt.level < 3
+      ),
+      paid_users AS (
+        SELECT DISTINCT cp.user_id
+        FROM cashin_payments cp
+        WHERE LOWER(cp.status) IN ('paid', 'payment.paid')
+      )
+      SELECT
+        COUNT(DISTINCT CASE WHEN rt.level = 1 AND pu.user_id IS NOT NULL THEN rt.id END) AS level1Deposited,
+        COUNT(DISTINCT CASE WHEN rt.level = 2 AND pu.user_id IS NOT NULL THEN rt.id END) AS level2Deposited,
+        COUNT(DISTINCT CASE WHEN rt.level = 3 AND pu.user_id IS NOT NULL THEN rt.id END) AS level3Deposited
+      FROM referral_tree rt
+      LEFT JOIN paid_users pu ON pu.user_id = rt.id
+      `, [parsedUserId]);
+        const level1Deposited = Number(refCountRows[0]?.level1Deposited ?? 0);
+        const level2Deposited = Number(refCountRows[0]?.level2Deposited ?? 0);
+        const level3Deposited = Number(refCountRows[0]?.level3Deposited ?? 0);
+        const hasRequirements = level1Deposited >= requiredL1 &&
+            level2Deposited >= requiredL2 &&
+            level3Deposited >= requiredL3;
+        if (!hasRequirements) {
+            await conn.rollback();
+            res.status(400).json({
+                ok: false,
+                error: 'Usuário não atende os requisitos para obter este contrato.',
+                requirements: {
+                    requiredLevel1Deposited: requiredL1,
+                    requiredLevel2Deposited: requiredL2,
+                    requiredLevel3Deposited: requiredL3,
+                },
+                current: {
+                    level1Deposited,
+                    level2Deposited,
+                    level3Deposited,
+                },
+            });
+            return;
+        }
+        const contractLabel = String(plan.title ?? 'Start V1').trim() || 'Start V1';
+        const currentContract = String(userRows[0]?.monthlySalaryContract ?? '').trim();
+        if (currentContract && currentContract === contractLabel) {
+            await conn.rollback();
+            res.status(400).json({ ok: false, error: 'Este plano já foi obtido anteriormente.' });
+            return;
+        }
+        await conn.query(`
+      UPDATE users
+      SET monthly_salary_contract = ?
+      WHERE id = ?
+      `, [contractLabel, parsedUserId]);
+        await conn.commit();
+        try {
+            const [telegramRows] = await db_1.default.query(`
+        SELECT
+          bot_token AS botToken,
+          group_id AS groupId
+        FROM system_telegram_config
+        WHERE TRIM(bot_token) <> ''
+          AND TRIM(group_id) <> ''
+        ORDER BY id ASC
+        LIMIT 1
+        `);
+            const botToken = String(telegramRows[0]?.botToken ?? '').trim();
+            const groupId = String(telegramRows[0]?.groupId ?? '').trim();
+            const rawPhone = String(userRows[0]?.phone ?? '').replace(/\D/g, '');
+            const maskedPhone = rawPhone.length >= 8
+                ? `${rawPhone.slice(0, 1)}***${rawPhone.slice(Math.max(rawPhone.length - 5, 1), Math.max(rawPhone.length - 4, 2))}***${rawPhone.slice(-2)}`
+                : (rawPhone || '***');
+            if (botToken && groupId) {
+                const announcementMessage = `📢 【Anúncio Oficial NOOR: Boletim de Promoção de Promotores】 🎁
+
+Parabéns ao usuário Telefone: ${maskedPhone} por ter sido promovido a Promotor ${contractLabel}
+
+Agora ele receberá um salario mensal de ${monthlySalaryFormatted} em sua conta creditado todos os meses.
+
+💡 Ao convidar amigos para se cadastrar e operar na plataforma, você não só ganha generosas recompensas em dinheiro por promoção, como também recebe comissões permanentes sobre taxas e ganhos de suas subcontas.`;
+                await sendTelegramMessage(botToken, groupId, announcementMessage);
+            }
+        }
+        catch (telegramErr) {
+            console.error('[monthly-salary-claim-telegram-announcement]', telegramErr);
+        }
+        res.json({
+            ok: true,
+            message: 'Contrato obtido com sucesso.',
+            contract: contractLabel,
+            plan: {
+                id: Number(plan.id),
+                title: String(plan.title ?? ''),
+            },
+        });
+    }
+    catch (err) {
+        await conn.rollback();
+        console.error('[monthly-salary-claim]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao obter contrato de salário mensal.' });
+    }
+    finally {
+        conn.release();
+    }
+});
 app.get('/api/referral/:userId', async (req, res) => {
     const userId = Number(req.params.userId);
     if (!userId || Number.isNaN(userId)) {
@@ -1437,6 +2645,7 @@ app.get('/api/referral/:userId', async (req, res) => {
 });
 app.get('/api/dashboard/cycle-products', async (_req, res) => {
     try {
+        await ensureCycleProductsTable();
         const [rows] = await db_1.default.query(`
       SELECT
         id,
@@ -1447,27 +2656,401 @@ app.get('/api/dashboard/cycle-products', async (_req, res) => {
         cycle_days AS cycleDays,
         image_url AS imageUrl,
         is_active AS isActive,
-        sort_order AS sortOrder
+        sort_order AS sortOrder,
+        plan_type AS planType,
+        stock_quantity AS stockQuantity,
+        expires_at AS expiresAt,
+        require_commission_level3_count AS requireCommissionLevel3Count
       FROM cycle_products
       WHERE is_active = 1
+      ORDER BY sort_order ASC, id ASC
+      `);
+        const products = rows.map((row) => {
+            const rawPlanType = String(row.planType ?? 'normal').trim().toLowerCase();
+            const planType = rawPlanType === 'vip' || rawPlanType === 'vip_day'
+                ? rawPlanType
+                : 'normal';
+            return {
+                id: Number(row.id),
+                name: String(row.name ?? ''),
+                description: String(row.description ?? ''),
+                amount: Number(row.amount ?? 0),
+                profit: Number(row.profit ?? 0),
+                cycleDays: Number(row.cycleDays ?? 0),
+                imageUrl: String(row.imageUrl ?? ''),
+                isActive: Number(row.isActive ?? 1) === 1,
+                sortOrder: Number(row.sortOrder ?? 0),
+                planType,
+                stockQuantity: Number(row.stockQuantity ?? 0),
+                expiresAt: row.expiresAt ?? null,
+                requireCommissionLevel3Count: Number(row.requireCommissionLevel3Count ?? 0),
+            };
+        });
+        res.json({ ok: true, products });
+    }
+    catch (err) {
+        console.error('[dashboard-cycle-products]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao listar planos de ciclo.' });
+    }
+});
+app.get('/api/admin/cycle-products', requireMaxAdmin, async (_req, res) => {
+    try {
+        await ensureCycleProductsTable();
+        const [rows] = await db_1.default.query(`
+      SELECT
+        id,
+        name,
+        description,
+        amount,
+        profit,
+        cycle_days AS cycleDays,
+        image_url AS imageUrl,
+        is_active AS isActive,
+        sort_order AS sortOrder,
+        plan_type AS planType,
+        stock_quantity AS stockQuantity,
+        expires_at AS expiresAt,
+        require_commission_level1_count AS requireCommissionLevel1Count,
+        require_commission_level2_count AS requireCommissionLevel2Count,
+        require_commission_level3_count AS requireCommissionLevel3Count,
+        created_at AS createdAt
+      FROM cycle_products
       ORDER BY sort_order ASC, id ASC
       `);
         const products = rows.map((row) => ({
             id: Number(row.id),
             name: String(row.name ?? ''),
             description: String(row.description ?? ''),
-            amount: Number(row.amount ?? 0),
-            profit: Number(row.profit ?? 0),
-            cycleDays: Number(row.cycleDays ?? 0),
             imageUrl: String(row.imageUrl ?? ''),
+            price: Number(row.amount ?? 0),
+            redeemRewardValue: Number(row.profit ?? 0),
+            cycleDays: Number(row.cycleDays ?? 0),
             isActive: Number(row.isActive ?? 1) === 1,
             sortOrder: Number(row.sortOrder ?? 0),
+            planType: String(row.planType ?? 'normal'),
+            stockQuantity: Number(row.stockQuantity ?? 0),
+            expiresAt: row.expiresAt ?? null,
+            requireCommissionLevel1Count: Number(row.requireCommissionLevel1Count ?? 0),
+            requireCommissionLevel2Count: Number(row.requireCommissionLevel2Count ?? 0),
+            requireCommissionLevel3Count: Number(row.requireCommissionLevel3Count ?? 0),
+            createdAt: row.createdAt ?? null,
         }));
         res.json({ ok: true, products });
     }
     catch (err) {
-        console.error('[dashboard-cycle-products]', err);
-        res.status(500).json({ ok: false, error: 'Erro ao listar planos de ciclo.' });
+        console.error('[admin-cycle-products-list]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao carregar produtos de ciclo.' });
+    }
+});
+app.post('/api/admin/cycle-products', requireMaxAdmin, async (req, res) => {
+    const { name, description, imageUrl, price, redeemRewardValue, isActive, cycleDays, sortOrder, planType, stockQuantity } = req.body;
+    const parsedName = String(name ?? '').trim();
+    const parsedDescription = String(description ?? '').trim();
+    const parsedImageUrl = String(imageUrl ?? '').trim();
+    const parsedPrice = Number(String(price ?? '').replace(',', '.'));
+    const parsedRedeemRewardValue = Number(String(redeemRewardValue ?? '').replace(',', '.'));
+    const parsedCycleDays = Number(String(cycleDays ?? 0));
+    const parsedSortOrder = Number(String(sortOrder ?? 0));
+    const parsedIsActive = isActive === true || isActive === 1 || String(isActive ?? '').toLowerCase() === 'true' ? 1 : 0;
+    const parsedStockQuantity = Number(String(stockQuantity ?? 0));
+    const parsedPlanTypeRaw = String(planType ?? 'normal').trim().toLowerCase();
+    const parsedPlanType = parsedPlanTypeRaw === 'vip' || parsedPlanTypeRaw === 'vip_day'
+        ? parsedPlanTypeRaw
+        : 'normal';
+    if (!parsedName) {
+        res.status(400).json({ ok: false, error: 'Nome do produto é obrigatório.' });
+        return;
+    }
+    if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
+        res.status(400).json({ ok: false, error: 'Preço inválido.' });
+        return;
+    }
+    if (!Number.isFinite(parsedRedeemRewardValue) || parsedRedeemRewardValue < 0) {
+        res.status(400).json({ ok: false, error: 'Valor de resgate inválido.' });
+        return;
+    }
+    if (!Number.isInteger(parsedCycleDays) || parsedCycleDays < 0) {
+        res.status(400).json({ ok: false, error: 'Ciclo (dias) inválido.' });
+        return;
+    }
+    try {
+        await ensureCycleProductsTable();
+        const [result] = await db_1.default.query(`
+      INSERT INTO cycle_products
+      (
+        name,
+        description,
+        amount,
+        profit,
+        cycle_days,
+        stock_quantity,
+        image_url,
+        is_active,
+        sort_order,
+        plan_type
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+            parsedName,
+            parsedDescription || null,
+            Number(parsedPrice.toFixed(2)),
+            Number(parsedRedeemRewardValue.toFixed(2)),
+            parsedCycleDays,
+            Number.isFinite(parsedStockQuantity) ? parsedStockQuantity : 0,
+            parsedImageUrl || null,
+            parsedIsActive,
+            Number.isFinite(parsedSortOrder) ? parsedSortOrder : 0,
+            parsedPlanType,
+        ]);
+        res.status(201).json({
+            ok: true,
+            message: 'Produto criado com sucesso.',
+            product: {
+                id: Number(result?.insertId ?? 0),
+                name: parsedName,
+            },
+        });
+    }
+    catch (err) {
+        console.error('[admin-cycle-products-create]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao criar produto.' });
+    }
+});
+app.put('/api/admin/cycle-products/:id', requireMaxAdmin, async (req, res) => {
+    const productId = Number(req.params.id);
+    const { name, description, imageUrl, price, redeemRewardValue, isActive, cycleDays, sortOrder, planType, stockQuantity } = req.body;
+    if (!productId || Number.isNaN(productId)) {
+        res.status(400).json({ ok: false, error: 'ID do produto inválido.' });
+        return;
+    }
+    const parsedName = String(name ?? '').trim();
+    const parsedDescription = String(description ?? '').trim();
+    const parsedImageUrl = String(imageUrl ?? '').trim();
+    const parsedPrice = Number(String(price ?? '').replace(',', '.'));
+    const parsedRedeemRewardValue = Number(String(redeemRewardValue ?? '').replace(',', '.'));
+    const parsedCycleDays = Number(String(cycleDays ?? 0));
+    const parsedSortOrder = Number(String(sortOrder ?? 0));
+    const parsedIsActive = isActive === true || isActive === 1 || String(isActive ?? '').toLowerCase() === 'true' ? 1 : 0;
+    const parsedStockQuantity = Number(String(stockQuantity ?? 0));
+    const parsedPlanTypeRaw = String(planType ?? 'normal').trim().toLowerCase();
+    const parsedPlanType = parsedPlanTypeRaw === 'vip' || parsedPlanTypeRaw === 'vip_day'
+        ? parsedPlanTypeRaw
+        : 'normal';
+    if (!parsedName) {
+        res.status(400).json({ ok: false, error: 'Nome do produto é obrigatório.' });
+        return;
+    }
+    if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
+        res.status(400).json({ ok: false, error: 'Preço inválido.' });
+        return;
+    }
+    if (!Number.isFinite(parsedRedeemRewardValue) || parsedRedeemRewardValue < 0) {
+        res.status(400).json({ ok: false, error: 'Valor de resgate inválido.' });
+        return;
+    }
+    if (!Number.isInteger(parsedCycleDays) || parsedCycleDays < 0) {
+        res.status(400).json({ ok: false, error: 'Ciclo (dias) inválido.' });
+        return;
+    }
+    try {
+        await ensureCycleProductsTable();
+        const [result] = await db_1.default.query(`
+      UPDATE cycle_products
+      SET
+        name = ?,
+        description = ?,
+        amount = ?,
+        profit = ?,
+        cycle_days = ?,
+        stock_quantity = ?,
+        image_url = ?,
+        is_active = ?,
+        sort_order = ?,
+        plan_type = ?,
+        updated_at = NOW()
+      WHERE id = ?
+      `, [
+            parsedName,
+            parsedDescription || null,
+            Number(parsedPrice.toFixed(2)),
+            Number(parsedRedeemRewardValue.toFixed(2)),
+            parsedCycleDays,
+            Number.isFinite(parsedStockQuantity) ? parsedStockQuantity : 0,
+            parsedImageUrl || null,
+            parsedIsActive,
+            Number.isFinite(parsedSortOrder) ? parsedSortOrder : 0,
+            parsedPlanType,
+            productId,
+        ]);
+        if (Number(result?.affectedRows ?? 0) <= 0) {
+            res.status(404).json({ ok: false, error: 'Produto não encontrado.' });
+            return;
+        }
+        res.json({ ok: true, message: 'Produto atualizado com sucesso.' });
+    }
+    catch (err) {
+        console.error('[admin-cycle-products-update]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao atualizar produto.' });
+    }
+});
+app.delete('/api/admin/cycle-products/:id', requireMaxAdmin, async (req, res) => {
+    const productId = Number(req.params.id);
+    if (!productId || Number.isNaN(productId)) {
+        res.status(400).json({ ok: false, error: 'ID do produto inválido.' });
+        return;
+    }
+    try {
+        await ensureCycleProductsTable();
+        const [result] = await db_1.default.query('DELETE FROM cycle_products WHERE id = ?', [productId]);
+        if (Number(result?.affectedRows ?? 0) <= 0) {
+            res.status(404).json({ ok: false, error: 'Produto não encontrado.' });
+            return;
+        }
+        res.json({ ok: true, message: 'Produto apagado com sucesso.' });
+    }
+    catch (err) {
+        console.error('[admin-cycle-products-delete]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao apagar produto.' });
+    }
+});
+// ────────────────────────────────────────────────────────────────
+//  ADMIN — Mini Tasks
+// ────────────────────────────────────────────────────────────────
+const ensureMiniTasksTable = async () => {
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS mini_tasks (
+      id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      title       VARCHAR(255)    NOT NULL,
+      invite_goal INT UNSIGNED    NOT NULL DEFAULT 0,
+      reward_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      badge_label VARCHAR(100)    NOT NULL DEFAULT '',
+      is_active   TINYINT(1)      NOT NULL DEFAULT 1,
+      sort_order  INT             NOT NULL DEFAULT 0,
+      created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_mini_tasks_sort (sort_order),
+      KEY idx_mini_tasks_active (is_active)
+    )
+  `);
+};
+app.get('/api/admin/mini-tasks', requireMaxAdmin, async (_req, res) => {
+    try {
+        await ensureMiniTasksTable();
+        const [rows] = await db_1.default.query(`
+      SELECT
+        id,
+        title,
+        invite_goal   AS inviteGoal,
+        reward_amount AS rewardAmount,
+        badge_label   AS badgeLabel,
+        is_active     AS isActive,
+        sort_order    AS sortOrder
+      FROM mini_tasks
+      ORDER BY sort_order ASC, id ASC
+    `);
+        const tasks = rows.map((row) => ({
+            id: Number(row.id),
+            title: String(row.title ?? ''),
+            inviteGoal: Number(row.inviteGoal ?? 0),
+            rewardAmount: Number(row.rewardAmount ?? 0),
+            badgeLabel: String(row.badgeLabel ?? ''),
+            isActive: Boolean(row.isActive),
+            sortOrder: Number(row.sortOrder ?? 0),
+        }));
+        res.json({ ok: true, tasks });
+    }
+    catch (err) {
+        console.error('[admin-mini-tasks-get]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao carregar mini tasks.' });
+    }
+});
+app.post('/api/admin/mini-tasks', requireMaxAdmin, async (req, res) => {
+    const { title, inviteGoal, rewardAmount, badgeLabel, isActive, sortOrder } = req.body;
+    const parsedTitle = String(title ?? '').trim();
+    if (!parsedTitle) {
+        res.status(400).json({ ok: false, error: 'Título é obrigatório.' });
+        return;
+    }
+    const parsedInviteGoal = Math.max(0, Math.round(Number(inviteGoal ?? 0)));
+    const parsedReward = Math.max(0, Number(String(rewardAmount ?? '0').replace(',', '.')));
+    const parsedBadge = String(badgeLabel ?? '').trim();
+    const parsedActive = isActive === true || Number(isActive) === 1 ? 1 : 0;
+    const parsedSortOrder = Number(sortOrder ?? 0);
+    if (!Number.isFinite(parsedReward)) {
+        res.status(400).json({ ok: false, error: 'Recompensa inválida.' });
+        return;
+    }
+    try {
+        await ensureMiniTasksTable();
+        const [result] = await db_1.default.query(`
+      INSERT INTO mini_tasks (title, invite_goal, reward_amount, badge_label, is_active, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?)
+      `, [parsedTitle, parsedInviteGoal, parsedReward, parsedBadge, parsedActive, parsedSortOrder]);
+        res.json({ ok: true, message: 'Mini task criada com sucesso.', id: Number(result?.insertId ?? 0) });
+    }
+    catch (err) {
+        console.error('[admin-mini-tasks-post]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao criar mini task.' });
+    }
+});
+app.put('/api/admin/mini-tasks/:id', requireMaxAdmin, async (req, res) => {
+    const taskId = Number(req.params.id);
+    if (!taskId || !Number.isInteger(taskId) || taskId <= 0) {
+        res.status(400).json({ ok: false, error: 'ID inválido.' });
+        return;
+    }
+    const { title, inviteGoal, rewardAmount, badgeLabel, isActive, sortOrder } = req.body;
+    const parsedTitle = String(title ?? '').trim();
+    if (!parsedTitle) {
+        res.status(400).json({ ok: false, error: 'Título é obrigatório.' });
+        return;
+    }
+    const parsedInviteGoal = Math.max(0, Math.round(Number(inviteGoal ?? 0)));
+    const parsedReward = Math.max(0, Number(String(rewardAmount ?? '0').replace(',', '.')));
+    const parsedBadge = String(badgeLabel ?? '').trim();
+    const parsedActive = isActive === true || Number(isActive) === 1 ? 1 : 0;
+    const parsedSortOrder = Number(sortOrder ?? 0);
+    if (!Number.isFinite(parsedReward)) {
+        res.status(400).json({ ok: false, error: 'Recompensa inválida.' });
+        return;
+    }
+    try {
+        await ensureMiniTasksTable();
+        const [result] = await db_1.default.query(`
+      UPDATE mini_tasks
+      SET title = ?, invite_goal = ?, reward_amount = ?, badge_label = ?, is_active = ?, sort_order = ?
+      WHERE id = ?
+      `, [parsedTitle, parsedInviteGoal, parsedReward, parsedBadge, parsedActive, parsedSortOrder, taskId]);
+        if (Number(result?.affectedRows ?? 0) === 0) {
+            res.status(404).json({ ok: false, error: 'Mini task não encontrada.' });
+            return;
+        }
+        res.json({ ok: true, message: 'Mini task atualizada com sucesso.' });
+    }
+    catch (err) {
+        console.error('[admin-mini-tasks-put]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao atualizar mini task.' });
+    }
+});
+app.delete('/api/admin/mini-tasks/:id', requireMaxAdmin, async (req, res) => {
+    const taskId = Number(req.params.id);
+    if (!taskId || !Number.isInteger(taskId) || taskId <= 0) {
+        res.status(400).json({ ok: false, error: 'ID inválido.' });
+        return;
+    }
+    try {
+        await ensureMiniTasksTable();
+        const [result] = await db_1.default.query(`DELETE FROM mini_tasks WHERE id = ?`, [taskId]);
+        if (Number(result?.affectedRows ?? 0) === 0) {
+            res.status(404).json({ ok: false, error: 'Mini task não encontrada.' });
+            return;
+        }
+        res.json({ ok: true, message: 'Mini task removida com sucesso.' });
+    }
+    catch (err) {
+        console.error('[admin-mini-tasks-delete]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao remover mini task.' });
     }
 });
 app.get('/api/vip/levels', async (_req, res) => {
@@ -1950,6 +3533,17 @@ app.get('/api/profile/metrics/:userId', async (req, res) => {
                 endsAt: cycleRows[0].endsAt,
             }
             : null;
+        // Receita de hoje: soma de todos os créditos registrados nos logs do usuário no dia atual
+        // Considera apenas ações de crédito (amount > 0) excluindo compras (que debitam)
+        const [todayIncomeRows] = await db_1.default.query(`
+      SELECT COALESCE(SUM(amount), 0) AS todayIncome
+      FROM logs
+      WHERE user_id = ?
+        AND amount > 0
+        AND action NOT IN ('cycle_investment_purchase', 'withdraw_request_created', 'withdraw_request_auto_processed')
+        AND DATE(created_at) = CURDATE()
+      `, [userId]).catch(() => [[{ todayIncome: 0 }], []]);
+        const todayIncome = Number(todayIncomeRows[0]?.todayIncome ?? 0);
         res.json({
             ok: true,
             metrics: {
@@ -1957,6 +3551,7 @@ app.get('/api/profile/metrics/:userId', async (req, res) => {
                 withdrawableBalance,
                 hasActiveCyclePlan,
                 activeCyclePlan,
+                todayIncome,
             },
         });
     }
@@ -1987,7 +3582,8 @@ app.post('/api/cycle-products/purchase', async (req, res) => {
             return;
         }
         const [products] = await conn.query(`
-      SELECT id, name, amount, profit, cycle_days AS cycleDays, is_active AS isActive
+      SELECT id, name, amount, profit, cycle_days AS cycleDays, is_active AS isActive,
+             stock_quantity AS stockQuantity
       FROM cycle_products
       WHERE id = ?
       LIMIT 1
@@ -1996,6 +3592,12 @@ app.post('/api/cycle-products/purchase', async (req, res) => {
         if (products.length === 0 || Number(products[0].isActive ?? 0) !== 1) {
             await conn.rollback();
             res.status(404).json({ ok: false, error: 'Produto de ciclo não encontrado ou inativo.' });
+            return;
+        }
+        const stockQuantity = Number(products[0].stockQuantity ?? 0);
+        if (stockQuantity <= 0) {
+            await conn.rollback();
+            res.status(400).json({ ok: false, error: 'Produto esgotado. Estoque indisponível.' });
             return;
         }
         const product = products[0];
@@ -2035,7 +3637,13 @@ app.post('/api/cycle-products/purchase', async (req, res) => {
       SET balance = COALESCE(balance, 0) - ?
       WHERE id = ?
       `, [amount, parsedUserId]);
+        // Decrementa o estoque do produto (protegido pelo FOR UPDATE acima)
         await conn.query(`
+      UPDATE cycle_products
+      SET stock_quantity = GREATEST(stock_quantity - 1, 0)
+      WHERE id = ?
+      `, [parsedCycleProductId]);
+        const [purchaseInsertResult] = await conn.query(`
       INSERT INTO user_cycle_purchases
       (
         user_id,
@@ -2055,6 +3663,55 @@ app.post('/api/cycle-products/purchase', async (req, res) => {
             Number(product.profit ?? 0),
             Number(product.cycleDays ?? 0),
             Number(product.cycleDays ?? 0),
+        ]);
+        const newBalance = Number((userBalance - amount).toFixed(2));
+        await conn.query(`
+      CREATE TABLE IF NOT EXISTS logs (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id BIGINT UNSIGNED NULL,
+        entity_type VARCHAR(60) NOT NULL,
+        entity_id BIGINT UNSIGNED NULL,
+        action VARCHAR(100) NOT NULL,
+        old_balance DECIMAL(12,2) NULL,
+        new_balance DECIMAL(12,2) NULL,
+        amount DECIMAL(12,2) NULL,
+        metadata JSON NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_logs_user_id (user_id),
+        KEY idx_logs_entity_type (entity_type),
+        KEY idx_logs_entity_id (entity_id),
+        KEY idx_logs_action (action),
+        KEY idx_logs_created_at (created_at)
+      )
+      `);
+        await conn.query(`
+      INSERT INTO logs
+      (
+        user_id,
+        entity_type,
+        entity_id,
+        action,
+        old_balance,
+        new_balance,
+        amount,
+        metadata
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+            parsedUserId,
+            'cycle',
+            Number(purchaseInsertResult?.insertId ?? 0),
+            'cycle_investment_purchase',
+            Number(userBalance.toFixed(2)),
+            Number(newBalance.toFixed(2)),
+            Number(amount.toFixed(2)),
+            JSON.stringify({
+                cycleProductId: Number(product.id),
+                cycleDays: Number(product.cycleDays ?? 0),
+                expectedProfit: Number(product.profit ?? 0),
+                purchaseId: Number(purchaseInsertResult?.insertId ?? 0),
+            }),
         ]);
         await conn.commit();
         res.json({
@@ -2287,27 +3944,140 @@ app.get('/api/team/members/:userId', async (req, res) => {
         res.status(500).json({ ok: false, error: 'Erro ao carregar membros da equipe.' });
     }
 });
-app.post('/api/roleta/spin', async (req, res) => {
+app.get('/api/roleta/spins-available/:userId', async (req, res) => {
+    const userId = Number(req.params.userId);
+    if (!userId || Number.isNaN(userId)) {
+        res.status(400).json({ ok: false, error: 'ID de usuário inválido.' });
+        return;
+    }
+    try {
+        await ensureUserRouletteSpinsTable();
+        const [users] = await db_1.default.query('SELECT id FROM users WHERE id = ? LIMIT 1', [userId]);
+        if (users.length === 0) {
+            res.status(404).json({ ok: false, error: 'Usuário não encontrado.' });
+            return;
+        }
+        const [rows] = await db_1.default.query(`
+      SELECT
+        available_spins AS availableSpins,
+        total_earned AS totalEarned,
+        total_used AS totalUsed
+      FROM user_roulette_spins
+      WHERE user_id = ?
+      LIMIT 1
+      `, [userId]);
+        res.json({
+            ok: true,
+            userId,
+            availableSpins: Number(rows[0]?.availableSpins ?? 0),
+            totalEarned: Number(rows[0]?.totalEarned ?? 0),
+            totalUsed: Number(rows[0]?.totalUsed ?? 0),
+        });
+    }
+    catch (err) {
+        console.error('[roleta-spins-available]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao carregar giros disponíveis.' });
+    }
+});
+// Fallback caso o banco esteja vazio
+const DEFAULT_ROULETTE_SEGMENTS = ['1 BRL', '16 BRL', '35 BRL', '50 BRL', '73 BRL', '90 BRL', '183 BRL', '16600 BRL'];
+// Extrai o valor numérico de um label como '35 BRL' => 35
+function parsePrizeAmount(label) {
+    const m = String(label).match(/[\d.,]+/);
+    if (!m)
+        return 0;
+    return Number(String(m[0]).replace(',', '.')) || 0;
+}
+// Sorteia um item da lista com base nos pesos (percent)
+function weightedRandom(items) {
+    const total = items.reduce((acc, item) => acc + item.percent, 0);
+    let rand = Math.random() * total;
+    for (const item of items) {
+        rand -= item.percent;
+        if (rand <= 0)
+            return item;
+    }
+    return items[items.length - 1];
+}
+// Endpoint público: retorna os segmentos da roleta na ordem do banco (para o frontend sincronizar)
+app.get('/api/roleta/segments', async (_req, res) => {
+    try {
+        await ensureRouletteProbabilitiesTable();
+        const [rows] = await db_1.default.query('SELECT label FROM roulette_probabilities ORDER BY sort_order ASC, id ASC');
+        const segments = rows.length > 0
+            ? rows.map((r) => String(r.label))
+            : DEFAULT_ROULETTE_SEGMENTS;
+        res.json({ ok: true, segments });
+    }
+    catch (err) {
+        console.error('[roleta-segments]', err);
+        res.json({ ok: true, segments: DEFAULT_ROULETTE_SEGMENTS });
+    }
+});
+app.post('/api/roleta/spin', spinLimiter, async (req, res) => {
     const { userId } = req.body;
     const parsedUserId = Number(userId);
     if (!parsedUserId || Number.isNaN(parsedUserId)) {
         res.status(400).json({ ok: false, error: 'ID de usuário inválido.' });
         return;
     }
-    const prizes = ['7 BRL', '16 BRL', '35 BRL', '73 BRL', '183 BRL', '16600 BRL', '50 BRL', '90 BRL'];
-    const selectedIndex = Math.floor(Math.random() * prizes.length);
-    const selectedPrize = prizes[selectedIndex];
-    const segmentAngle = 360 / prizes.length;
-    const pointerAngle = 270;
-    const targetCenterAngle = selectedIndex * segmentAngle + segmentAngle / 2;
-    const rotationFinal = 2160 + (pointerAngle - targetCenterAngle);
+    // Carrega probabilidades do banco (com fallback para padrão)
+    // A ordem do banco (sort_order) define a posição visual de cada segmento na roda
+    await ensureRouletteProbabilitiesTable();
+    const [probRows] = await db_1.default.query('SELECT label, percent FROM roulette_probabilities ORDER BY sort_order ASC, id ASC');
+    const probabilities = probRows.length > 0
+        ? probRows.map((r) => ({ label: String(r.label), percent: Number(r.percent) }))
+        : DEFAULT_ROULETTE_SEGMENTS.map((label) => ({ label, percent: 100 / DEFAULT_ROULETTE_SEGMENTS.length }));
+    // Sorteia o prêmio com base nos pesos
+    const picked = weightedRandom(probabilities);
+    const selectedPrize = picked.label;
+    const fixedPrizeAmount = parsePrizeAmount(selectedPrize);
+    // O índice visual do segmento é a posição no array de probabilidades (que segue sort_order do banco)
+    // Isso garante que prizeIndex corresponde ao segmento visual exato na roda do frontend
+    const selectedIndex = probabilities.findIndex((p) => p.label.toLowerCase() === selectedPrize.toLowerCase());
+    const finalSegmentIndex = selectedIndex >= 0 ? selectedIndex : 0;
+    const segmentCount = probabilities.length;
+    const segmentAngle = 360 / segmentCount;
+    // Centro do segmento vencedor (em graus, sentido horário, 0° = topo)
+    const centerAngle = finalSegmentIndex * segmentAngle + segmentAngle / 2;
+    // rotationFinal não é mais calculado no backend — o frontend calcula com base em prizeIndex
+    const conn = await db_1.default.getConnection();
     try {
-        const [users] = await db_1.default.query('SELECT id FROM users WHERE id = ? LIMIT 1', [parsedUserId]);
+        await ensureUserRouletteSpinsTable();
+        await conn.beginTransaction();
+        const [users] = await conn.query('SELECT id, balance FROM users WHERE id = ? LIMIT 1 FOR UPDATE', [parsedUserId]);
         if (users.length === 0) {
+            await conn.rollback();
             res.status(404).json({ ok: false, error: 'Usuário não encontrado.' });
             return;
         }
-        await db_1.default.query(`
+        const [spinRows] = await conn.query(`
+      SELECT available_spins AS availableSpins
+      FROM user_roulette_spins
+      WHERE user_id = ?
+      LIMIT 1
+      FOR UPDATE
+      `, [parsedUserId]);
+        const availableSpins = Number(spinRows[0]?.availableSpins ?? 0);
+        if (availableSpins <= 0) {
+            await conn.rollback();
+            res.status(400).json({ ok: false, error: 'Você não possui giros disponíveis.' });
+            return;
+        }
+        await conn.query(`
+      UPDATE user_roulette_spins
+      SET
+        available_spins = COALESCE(available_spins, 0) - 1,
+        total_used = COALESCE(total_used, 0) + 1,
+        updated_at = NOW()
+      WHERE user_id = ?
+      `, [parsedUserId]);
+        await conn.query(`
+      UPDATE users
+      SET balance = COALESCE(balance, 0) + ?
+      WHERE id = ?
+      `, [fixedPrizeAmount, parsedUserId]);
+        await conn.query(`
       CREATE TABLE IF NOT EXISTS roulette_spins (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         user_id BIGINT UNSIGNED NOT NULL,
@@ -2321,26 +4091,93 @@ app.post('/api/roleta/spin', async (req, res) => {
         KEY idx_roulette_spins_created_at (created_at)
       )
       `);
-        const [result] = await db_1.default.query(`
+        const [result] = await conn.query(`
       INSERT INTO roulette_spins
       (user_id, prize_label, prize_index, rotation_final, source)
       VALUES (?, ?, ?, ?, ?)
-      `, [parsedUserId, selectedPrize, selectedIndex, rotationFinal, 'roleta_page']);
+      `, [parsedUserId, selectedPrize, finalSegmentIndex, centerAngle, 'invite_level_1_reward']);
+        await conn.query(`
+      CREATE TABLE IF NOT EXISTS logs (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id BIGINT UNSIGNED NULL,
+        entity_type VARCHAR(60) NOT NULL,
+        entity_id BIGINT UNSIGNED NULL,
+        action VARCHAR(100) NOT NULL,
+        old_balance DECIMAL(12,2) NULL,
+        new_balance DECIMAL(12,2) NULL,
+        amount DECIMAL(12,2) NULL,
+        metadata JSON NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_logs_user_id (user_id),
+        KEY idx_logs_entity_type (entity_type),
+        KEY idx_logs_entity_id (entity_id),
+        KEY idx_logs_action (action),
+        KEY idx_logs_created_at (created_at)
+      )
+      `);
+        const oldBalance = Number(users[0].balance ?? 0);
+        const newBalance = Number((oldBalance + fixedPrizeAmount).toFixed(2));
+        await conn.query(`
+      INSERT INTO logs
+      (
+        user_id,
+        entity_type,
+        entity_id,
+        action,
+        old_balance,
+        new_balance,
+        amount,
+        metadata
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+            parsedUserId,
+            'roulette',
+            Number(result?.insertId ?? 0),
+            'roulette_spin_invite_reward',
+            Number(oldBalance.toFixed(2)),
+            newBalance,
+            Number(fixedPrizeAmount.toFixed(2)),
+            JSON.stringify({
+                prizeLabel: selectedPrize,
+                source: 'invite_level_1_reward',
+            }),
+        ]);
+        await conn.commit();
         res.json({
             ok: true,
             spin: {
                 id: Number(result?.insertId ?? 0),
                 userId: parsedUserId,
                 prizeLabel: selectedPrize,
-                prizeIndex: selectedIndex,
-                rotationFinal,
+                // prizeIndex = posição do segmento no array do banco (sort_order), mesmo usado pelo frontend
+                prizeIndex: finalSegmentIndex,
+                // centerAngle = ângulo do centro do segmento vencedor (0° = topo, sentido horário)
+                centerAngle,
+                segmentCount,
                 createdAt: new Date().toISOString(),
             },
+            rewardAmount: Number(fixedPrizeAmount.toFixed(2)),
+            availableSpinsAfter: Math.max(availableSpins - 1, 0),
+            balanceAfter: newBalance,
         });
+        // Log do giro da roleta (fire-and-forget)
+        sendTelegramLog(`🎰 <b>Giro da Roleta</b>\n` +
+            `👤 Usuário ID: <code>${parsedUserId}</code>\n` +
+            `🏆 Prêmio: <b>${selectedPrize}</b>\n` +
+            `💰 Valor: R$ ${Number(fixedPrizeAmount.toFixed(2)).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}\n` +
+            `💳 Saldo após: R$ ${Number(newBalance.toFixed(2)).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}\n` +
+            `🎟️ Giros restantes: ${Math.max(availableSpins - 1, 0)}\n` +
+            `📅 ${new Date().toLocaleString('pt-BR')}`).catch(() => { });
     }
     catch (err) {
+        await conn.rollback();
         console.error('[roleta-spin]', err);
         res.status(500).json({ ok: false, error: 'Erro ao registrar giro da roleta.' });
+    }
+    finally {
+        conn.release();
     }
 });
 app.get('/api/roleta/spins/:userId', async (req, res) => {
@@ -3309,20 +5146,116 @@ app.post('/api/user/change-password', async (req, res) => {
         res.status(500).json({ ok: false, error: 'Erro ao alterar senha de login.' });
     }
 });
-app.post('/api/withdraw/request', async (req, res) => {
-    const { userId, amount, withdrawPassword } = req.body;
+app.post('/api/withdraw/activation-token', requireAuth, async (req, res) => {
+    const { userId } = req.body;
     const parsedUserId = Number(userId);
-    const parsedAmount = Number(String(amount ?? '').replace(',', '.'));
-    const parsedPassword = String(withdrawPassword ?? '').trim();
     if (!parsedUserId || Number.isNaN(parsedUserId)) {
         res.status(400).json({ ok: false, error: 'ID de usuário inválido.' });
         return;
     }
+    if (Number(req.authUser?.id ?? 0) !== parsedUserId) {
+        res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' });
+        return;
+    }
+    try {
+        const token = await createWithdrawActivationToken(parsedUserId);
+        res.json({
+            ok: true,
+            token,
+            message: `Ative o saque para mim: ${token}`,
+            expiresInMinutes: 30,
+        });
+    }
+    catch (err) {
+        console.error('[withdraw-activation-token]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao gerar token de ativação de saque.' });
+    }
+});
+app.get('/api/withdraw/activation-status/:userId', requireAuth, async (req, res) => {
+    const parsedUserId = Number(req.params.userId);
+    if (!parsedUserId || Number.isNaN(parsedUserId)) {
+        res.status(400).json({ ok: false, error: 'ID de usuário inválido.' });
+        return;
+    }
+    if (Number(req.authUser?.id ?? 0) !== parsedUserId) {
+        res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' });
+        return;
+    }
+    try {
+        await ensureWithdrawActivationTokensTable();
+        const [rows] = await db_1.default.query(`
+      SELECT
+        id,
+        activated_at AS activatedAt,
+        DATE_ADD(activated_at, INTERVAL 24 HOUR) AS expiresAt
+      FROM withdraw_activation_tokens
+      WHERE user_id = ?
+        AND status = 'activated'
+        AND activated_at IS NOT NULL
+        AND activated_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      ORDER BY activated_at DESC, id DESC
+      LIMIT 1
+      `, [parsedUserId]);
+        if (rows.length === 0) {
+            res.json({
+                ok: true,
+                isActivated: false,
+                activatedAt: null,
+                expiresAt: null,
+            });
+            return;
+        }
+        res.json({
+            ok: true,
+            isActivated: true,
+            activatedAt: rows[0].activatedAt ?? null,
+            expiresAt: rows[0].expiresAt ?? null,
+        });
+    }
+    catch (err) {
+        console.error('[withdraw-activation-status]', err);
+        res.status(500).json({ ok: false, error: 'Erro ao consultar status de ativação de saque.' });
+    }
+});
+app.post('/api/withdraw/request', async (req, res) => {
+    // ── Segurança: rejeita body não-objeto ou ausente ──
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        res.status(400).json({ ok: false, error: 'Requisição inválida.' });
+        return;
+    }
+    const { userId, amount, withdrawPassword } = req.body;
+    // ── Segurança: userId deve ser inteiro positivo ──
+    const parsedUserId = Number(userId);
+    if (!Number.isInteger(parsedUserId) || parsedUserId <= 0 || parsedUserId > 2147483647) {
+        res.status(400).json({ ok: false, error: 'ID de usuário inválido.' });
+        return;
+    }
+    // ── Segurança: amount deve ser string/número, sem scripts, max 12 chars ──
+    const rawAmountStr = String(amount ?? '')
+        .replace(/[^0-9.,]/g, '') // somente dígitos, vírgula e ponto
+        .replace(',', '.')
+        .slice(0, 12);
+    const parsedAmount = Number(rawAmountStr);
     if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
         res.status(400).json({ ok: false, error: 'Informe um valor de saque válido.' });
         return;
     }
-    if (!parsedPassword || parsedPassword.length < 6) {
+    // ── Segurança: não mais que 2 casas decimais ──
+    const decimalPart = rawAmountStr.split('.')[1] ?? '';
+    if (decimalPart.length > 2) {
+        res.status(400).json({ ok: false, error: 'Valor com no máximo 2 casas decimais.' });
+        return;
+    }
+    // ── Segurança: limite absoluto — nenhum saque acima de R$ 100.000 via API ──
+    if (parsedAmount > 100000) {
+        res.status(400).json({ ok: false, error: 'Valor de saque excede o limite permitido.' });
+        return;
+    }
+    // ── Segurança: senha só aceita caracteres imprimíveis, sem controles ──
+    const parsedPassword = String(withdrawPassword ?? '')
+        .replace(/[\x00-\x1F\x7F]/g, '')
+        .trim();
+    if (!parsedPassword || parsedPassword.length < 6 || parsedPassword.length > 72) {
         res.status(400).json({ ok: false, error: 'Senha de saque inválida.' });
         return;
     }
@@ -3376,17 +5309,52 @@ app.post('/api/withdraw/request', async (req, res) => {
             res.status(401).json({ ok: false, error: 'Senha de saque incorreta.' });
             return;
         }
-        const [todayRows] = await conn.query(`
+        await ensureWithdrawActivationTokensTable();
+        const [activationRows] = await conn.query(`
+      SELECT id
+      FROM withdraw_activation_tokens
+      WHERE user_id = ?
+        AND status = 'activated'
+        AND activated_at IS NOT NULL
+        AND activated_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      ORDER BY activated_at DESC, id DESC
+      LIMIT 1
+      FOR UPDATE
+      `, [parsedUserId]);
+        if (activationRows.length === 0) {
+            await conn.rollback();
+            res.status(400).json({
+                ok: false,
+                error: 'Saque não ativado. Envie no grupo permitido: "Ative o saque para mim: TOKEN".',
+            });
+            return;
+        }
+        const activationTokenId = Number(activationRows[0].id ?? 0);
+        const [openWithdrawRows] = await conn.query(`
+      SELECT id
+      FROM withdrawals
+      WHERE user_id = ?
+        AND LOWER(status) IN ('pending', 'processing')
+      LIMIT 1
+      FOR UPDATE
+      `, [parsedUserId]);
+        if (openWithdrawRows.length > 0) {
+            await conn.rollback();
+            res.status(400).json({ ok: false, error: 'Você já possui um saque em análise/processamento.' });
+            return;
+        }
+        const [todayPaidRows] = await conn.query(`
       SELECT id
       FROM withdrawals
       WHERE user_id = ?
         AND DATE(created_at) = CURDATE()
+        AND LOWER(status) IN ('paid', 'payment.paid')
       LIMIT 1
       FOR UPDATE
       `, [parsedUserId]);
-        if (todayRows.length > 0) {
+        if (todayPaidRows.length > 0) {
             await conn.rollback();
-            res.status(400).json({ ok: false, error: 'Você já solicitou um saque hoje. Tente novamente amanhã.' });
+            res.status(400).json({ ok: false, error: 'Você já realizou um saque pago hoje. Tente novamente amanhã.' });
             return;
         }
         const [pixRows] = await conn.query(`
@@ -3417,12 +5385,7 @@ app.post('/api/withdraw/request', async (req, res) => {
         }
         if (currentBalance < parsedAmount) {
             await conn.rollback();
-            res.status(400).json({
-                ok: false,
-                error: 'Saldo insuficiente para saque.',
-                required: parsedAmount,
-                available: currentBalance,
-            });
+            res.status(400).json({ ok: false, error: 'Saldo insuficiente para saque.' });
             return;
         }
         await conn.query(`
@@ -3452,6 +5415,9 @@ app.post('/api/withdraw/request', async (req, res) => {
         min_withdraw_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
         max_withdraw_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
         withdraw_auto_approve TINYINT(1) NOT NULL DEFAULT 0,
+        withdraw_start_time CHAR(5) NOT NULL DEFAULT '00:00',
+        withdraw_end_time CHAR(5) NOT NULL DEFAULT '23:59',
+        withdraw_allowed_days VARCHAR(32) NOT NULL DEFAULT '0,1,2,3,4,5,6',
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id)
@@ -3466,15 +5432,132 @@ app.post('/api/withdraw/request', async (req, res) => {
         catch {
             // coluna já existe
         }
+        try {
+            await conn.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_start_time CHAR(5) NOT NULL DEFAULT '00:00'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        try {
+            await conn.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_end_time CHAR(5) NOT NULL DEFAULT '23:59'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        try {
+            await conn.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_allowed_days VARCHAR(32) NOT NULL DEFAULT '0,1,2,3,4,5,6'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
         const [configRows] = await conn.query(`
-      SELECT withdraw_auto_approve AS withdrawAutoApprove
+      SELECT
+        withdraw_auto_approve AS withdrawAutoApprove,
+        withdraw_fee_percent AS withdrawFeePercent,
+        min_withdraw_amount AS minWithdrawAmount,
+        max_withdraw_amount AS maxWithdrawAmount,
+        withdraw_start_time AS withdrawStartTime,
+        withdraw_end_time AS withdrawEndTime,
+        withdraw_allowed_days AS withdrawAllowedDays
       FROM system_withdraw_config
       ORDER BY id ASC
       LIMIT 1
       `);
         const shouldAutoApprove = Number(configRows[0]?.withdrawAutoApprove ?? 0) === 1;
-        const oldBalance = Number(currentBalance.toFixed(2));
-        const newBalance = Number((oldBalance - parsedAmount).toFixed(2));
+        const withdrawFeePercentRaw = Number(configRows[0]?.withdrawFeePercent ?? 0);
+        const minWithdrawAmount = Number(configRows[0]?.minWithdrawAmount ?? 0);
+        const maxWithdrawAmount = Number(configRows[0]?.maxWithdrawAmount ?? 0);
+        const withdrawStartTime = String(configRows[0]?.withdrawStartTime ?? '00:00').trim();
+        const withdrawEndTime = String(configRows[0]?.withdrawEndTime ?? '23:59').trim();
+        const allowedDaysSet = new Set(String(configRows[0]?.withdrawAllowedDays ?? '0,1,2,3,4,5,6')
+            .split(',')
+            .map((item) => Number(item.trim()))
+            .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6));
+        const withdrawFeePercent = Number.isFinite(withdrawFeePercentRaw)
+            ? Math.max(0, withdrawFeePercentRaw)
+            : 0;
+        // ── Segurança: valida min/max configurados no backend ──
+        if (Number.isFinite(minWithdrawAmount) && minWithdrawAmount > 0 && parsedAmount < minWithdrawAmount) {
+            await conn.rollback();
+            res.status(400).json({
+                ok: false,
+                error: `O valor mínimo de saque é R$ ${minWithdrawAmount.toFixed(2).replace('.', ',')}.`,
+            });
+            return;
+        }
+        if (Number.isFinite(maxWithdrawAmount) && maxWithdrawAmount > 0 && parsedAmount > maxWithdrawAmount) {
+            await conn.rollback();
+            res.status(400).json({
+                ok: false,
+                error: `O valor máximo de saque é R$ ${maxWithdrawAmount.toFixed(2).replace('.', ',')}.`,
+            });
+            return;
+        }
+        const nowInSaoPaulo = new Date(new Date().toLocaleString('en-US', { timeZone: SAO_PAULO_TZ }));
+        const currentWeekDay = nowInSaoPaulo.getDay();
+        const currentMinutes = nowInSaoPaulo.getHours() * 60 + nowInSaoPaulo.getMinutes();
+        const parseTimeToMinutes = (timeValue) => {
+            const [hh, mm] = String(timeValue ?? '').split(':').map((v) => Number(v));
+            if (!Number.isInteger(hh) || !Number.isInteger(mm))
+                return null;
+            if (hh < 0 || hh > 23 || mm < 0 || mm > 59)
+                return null;
+            return hh * 60 + mm;
+        };
+        const startMinutes = parseTimeToMinutes(withdrawStartTime);
+        const endMinutes = parseTimeToMinutes(withdrawEndTime);
+        if (startMinutes == null ||
+            endMinutes == null ||
+            !allowedDaysSet.has(currentWeekDay)) {
+            await conn.rollback();
+            res.status(400).json({
+                ok: false,
+                error: 'Saque indisponível no momento conforme a configuração de dia/horário.',
+            });
+            return;
+        }
+        const isWithinWindow = startMinutes <= endMinutes
+            ? currentMinutes >= startMinutes && currentMinutes <= endMinutes
+            : currentMinutes >= startMinutes || currentMinutes <= endMinutes;
+        if (!isWithinWindow) {
+            await conn.rollback();
+            res.status(400).json({
+                ok: false,
+                error: `Saque permitido apenas entre ${withdrawStartTime} e ${withdrawEndTime} (horário de São Paulo).`,
+            });
+            return;
+        }
+        // ── Segurança: arredonda para 2 casas antes de qualquer cálculo monetário ──
+        const safeAmount = Math.round(parsedAmount * 100) / 100;
+        const feeAmount = Math.round(safeAmount * (withdrawFeePercent / 100) * 100) / 100;
+        const netAmount = Math.round((safeAmount - feeAmount) * 100) / 100;
+        if (!Number.isFinite(netAmount) || netAmount <= 0) {
+            await conn.rollback();
+            res.status(400).json({
+                ok: false,
+                error: 'Valor líquido do saque inválido após taxa configurada.',
+                requestedAmount: safeAmount,
+                feePercent: withdrawFeePercent,
+            });
+            return;
+        }
+        const oldBalance = Math.round(Number(currentBalance) * 100) / 100;
+        const newBalance = Math.round((oldBalance - safeAmount) * 100) / 100;
+        // ── Segurança: double-check saldo negativo após cálculo ──
+        if (newBalance < 0) {
+            await conn.rollback();
+            res.status(400).json({ ok: false, error: 'Saldo insuficiente para saque.' });
+            return;
+        }
         await conn.query(`
       UPDATE users
       SET balance = ?
@@ -3488,7 +5571,7 @@ app.post('/api/withdraw/request', async (req, res) => {
             const lumopayPixType = mapPixTypeToLumopay(pixKeyType);
             const lumopayPixKey = normalizeLumopayPixKey(pixKey, lumopayPixType);
             const cashoutPayload = {
-                amount: Number(parsedAmount.toFixed(2)),
+                amount: netAmount,
                 pixKey: lumopayPixKey,
                 pixKeyType: lumopayPixType,
                 description: `Saque PIX auto #${externalId}`,
@@ -3539,7 +5622,7 @@ app.post('/api/withdraw/request', async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
             parsedUserId,
-            Number(parsedAmount.toFixed(2)),
+            safeAmount,
             holderName,
             holderCpf,
             pixKeyType,
@@ -3570,12 +5653,17 @@ app.post('/api/withdraw/request', async (req, res) => {
             shouldAutoApprove ? 'withdraw_request_auto_processed' : 'withdraw_request_created',
             oldBalance,
             newBalance,
-            Number(parsedAmount.toFixed(2)),
+            safeAmount,
             JSON.stringify({
                 status: withdrawStatus,
                 externalId,
                 autoApprove: shouldAutoApprove,
                 providerTransactionId,
+                activationTokenId,
+                requestedAmount: safeAmount,
+                feePercent: withdrawFeePercent,
+                feeAmount,
+                netAmount,
             }),
         ]);
         await conn.commit();
@@ -3586,7 +5674,10 @@ app.post('/api/withdraw/request', async (req, res) => {
                 : 'Solicitação de saque enviada com sucesso.',
             withdraw: {
                 id: Number(insertResult?.insertId ?? 0),
-                amount: Number(parsedAmount.toFixed(2)),
+                amount: safeAmount,
+                feePercent: withdrawFeePercent,
+                feeAmount,
+                netAmount,
                 status: withdrawStatus,
                 transactionId: providerTransactionId,
                 externalId,
@@ -3832,6 +5923,134 @@ app.post('/api/withdraw/webhook', async (req, res) => {
         res.status(500).json({ ok: false, error: 'Erro ao processar webhook de saque.' });
     }
 });
+const ensureCycleProductsTable = async () => {
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS cycle_products (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(150) NOT NULL,
+      description TEXT NULL,
+      amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      profit DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      cycle_days INT NOT NULL DEFAULT 0,
+      image_url VARCHAR(500) NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      sort_order INT NOT NULL DEFAULT 0,
+      stock_quantity INT NOT NULL DEFAULT 0,
+      expires_at DATETIME NULL,
+      require_commission_level3_count INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_cycle_products_active (is_active),
+      KEY idx_cycle_products_sort (sort_order)
+    )
+    `);
+    const tryAlter = async (sql) => {
+        try {
+            await db_1.default.query(sql);
+        }
+        catch {
+            // coluna já existe / alteração não necessária
+        }
+    };
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN description TEXT NULL
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN image_url VARCHAR(500) NULL
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN sort_order INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN cycle_days INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN stock_quantity INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN expires_at DATETIME NULL
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN require_commission_level3_count INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN require_commission_level1_count INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN require_commission_level2_count INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE cycle_products
+    ADD COLUMN plan_type VARCHAR(20) NOT NULL DEFAULT 'normal'
+  `);
+};
+const normalizeCommissionLevelRequirementsInput = (value) => {
+    if (!Array.isArray(value))
+        return [];
+    const normalized = value
+        .map((item) => {
+        const typed = (item ?? {});
+        const commissionLevelId = Number(typed.commissionLevelId);
+        const requiredCount = Number(typed.requiredCount);
+        if (!Number.isInteger(commissionLevelId) || commissionLevelId <= 0)
+            return null;
+        if (!Number.isInteger(requiredCount) || requiredCount < 0)
+            return null;
+        return { commissionLevelId, requiredCount };
+    })
+        .filter((item) => Boolean(item));
+    const dedupMap = new Map();
+    for (const item of normalized) {
+        dedupMap.set(item.commissionLevelId, item.requiredCount);
+    }
+    return Array.from(dedupMap.entries()).map(([commissionLevelId, requiredCount]) => ({
+        commissionLevelId,
+        requiredCount,
+    }));
+};
+const loadCycleProductRequirementsMap = async () => {
+    const [rows] = await db_1.default.query(`
+    SELECT
+      cpr.cycle_product_id AS cycleProductId,
+      cpr.commission_level_id AS commissionLevelId,
+      cpr.required_count AS requiredCount,
+      cl.level AS level,
+      cl.name AS levelName
+    FROM cycle_product_commission_requirements cpr
+    INNER JOIN commission_levels cl ON cl.id = cpr.commission_level_id
+    WHERE cl.is_active = 1
+    ORDER BY cpr.cycle_product_id ASC, cl.level ASC, cpr.id ASC
+    `);
+    const requirementsMap = new Map();
+    for (const row of rows) {
+        const productId = Number(row.cycleProductId ?? 0);
+        if (!productId)
+            continue;
+        const list = requirementsMap.get(productId) ?? [];
+        list.push({
+            commissionLevelId: Number(row.commissionLevelId ?? 0),
+            level: Number(row.level ?? 0),
+            levelName: String(row.levelName ?? ''),
+            requiredCount: Number(row.requiredCount ?? 0),
+        });
+        requirementsMap.set(productId, list);
+    }
+    return requirementsMap;
+};
 const ensureGiftVoucherTables = async () => {
     await db_1.default.query(`
     CREATE TABLE IF NOT EXISTS gift_vouchers (
@@ -3885,6 +6104,107 @@ const ensureGiftVoucherTables = async () => {
     ADD COLUMN generated_gift_code_id BIGINT UNSIGNED NULL
   `);
 };
+const ensureVipAndMiningTables = async () => {
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS mining_tasks (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(120) NOT NULL,
+      description VARCHAR(255) NOT NULL,
+      daily_limit INT NOT NULL DEFAULT 1,
+      reward_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    )
+    `);
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS user_mining_task_progress (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      task_id BIGINT UNSIGNED NOT NULL,
+      progress_date DATE NOT NULL,
+      completed_count INT NOT NULL DEFAULT 0,
+      earned_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_user_task_date (user_id, task_id, progress_date),
+      KEY idx_user_progress (user_id, progress_date),
+      KEY idx_task_progress (task_id, progress_date)
+    )
+    `);
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS vip_levels (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(80) NOT NULL,
+      price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      daily_task_limit INT NOT NULL DEFAULT 0,
+      task_reward_multiplier DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+      benefits TEXT NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      sort_order INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    )
+    `);
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS user_vips (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      vip_level_id BIGINT UNSIGNED NOT NULL,
+      status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
+      started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_user_vips_user_id (user_id),
+      KEY idx_user_vips_level_id (vip_level_id),
+      KEY idx_user_vips_status (status)
+    )
+    `);
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS vip_purchase_history (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      vip_level_id BIGINT UNSIGNED NOT NULL,
+      amount_paid DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      balance_before DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      balance_after DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_vip_purchase_user_id (user_id),
+      KEY idx_vip_purchase_level_id (vip_level_id)
+    )
+    `);
+    const [vipCountRows] = await db_1.default.query('SELECT COUNT(*) AS total FROM vip_levels');
+    const totalVips = Number(vipCountRows[0]?.total ?? 0);
+    if (totalVips === 0) {
+        await db_1.default.query(`
+      INSERT INTO vip_levels
+        (name, price, daily_task_limit, task_reward_multiplier, benefits, is_active, sort_order)
+      VALUES
+        ('VIP 1', 29.90, 5, 1.10, 'Acesso básico às tarefas VIP', 1, 1),
+        ('VIP 2', 59.90, 10, 1.20, 'Limite diário maior + prioridade padrão', 1, 2),
+        ('VIP 3', 99.90, 20, 1.35, 'Bônus de comissão intermediário', 1, 3),
+        ('VIP 4', 199.90, 35, 1.50, 'Comissão avançada e suporte prioritário', 1, 4),
+        ('VIP 5', 399.90, 60, 2.00, 'Plano máximo com maiores ganhos', 1, 5)
+      `);
+    }
+    const [taskCountRows] = await db_1.default.query('SELECT COUNT(*) AS total FROM mining_tasks');
+    const totalTasks = Number(taskCountRows[0]?.total ?? 0);
+    if (totalTasks === 0) {
+        await db_1.default.query(`
+      INSERT INTO mining_tasks (name, description, daily_limit, reward_amount, is_active)
+      VALUES
+        ('Mineração Bronze', 'Execute mineração básica com baixo consumo.', 10, 0.50, 1),
+        ('Mineração Prata', 'Mineração intermediária com retorno estável.', 6, 1.00, 1),
+        ('Mineração Ouro', 'Mineração avançada com maior recompensa.', 3, 2.50, 1)
+      `);
+    }
+};
 const ensureCommissionLevelsTable = async () => {
     await db_1.default.query(`
     CREATE TABLE IF NOT EXISTS commission_levels (
@@ -3933,6 +6253,99 @@ const ensureCommissionPayoutsTable = async () => {
       KEY idx_commission_payouts_beneficiary (beneficiary_user_id)
     )
     `);
+};
+const ensureMonthlySalaryPlansTable = async () => {
+    await db_1.default.query(`
+    CREATE TABLE IF NOT EXISTS monthly_salary_plans (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      title VARCHAR(150) NOT NULL,
+      image_url VARCHAR(500) NULL,
+      monthly_salary DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      required_level1_deposited INT NOT NULL DEFAULT 0,
+      required_level2_deposited INT NOT NULL DEFAULT 0,
+      required_level3_deposited INT NOT NULL DEFAULT 0,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      sort_order INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_monthly_salary_plans_active (is_active),
+      KEY idx_monthly_salary_plans_sort (sort_order)
+    )
+    `);
+    const tryAlter = async (sql) => {
+        try {
+            await db_1.default.query(sql);
+        }
+        catch {
+            // coluna/índice já existe ou não precisa alterar
+        }
+    };
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN image_url VARCHAR(500) NULL
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN monthly_salary DECIMAL(12,2) NOT NULL DEFAULT 0.00
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN required_level1_deposited INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN required_level2_deposited INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN required_level3_deposited INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN sort_order INT NOT NULL DEFAULT 0
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD KEY idx_monthly_salary_plans_active (is_active)
+  `);
+    await tryAlter(`
+    ALTER TABLE monthly_salary_plans
+    ADD KEY idx_monthly_salary_plans_sort (sort_order)
+  `);
+    const [countRows] = await db_1.default.query(`
+    SELECT COUNT(*) AS total
+    FROM monthly_salary_plans
+    `);
+    const total = Number(countRows[0]?.total ?? 0);
+    if (total === 0) {
+        await db_1.default.query(`
+      INSERT INTO monthly_salary_plans
+      (
+        title,
+        monthly_salary,
+        required_level1_deposited,
+        required_level2_deposited,
+        required_level3_deposited,
+        is_active,
+        sort_order
+      )
+      VALUES
+      ('Start V1', 100.00, 100, 0, 0, 1, 1)
+      `);
+    }
 };
 const applyReferralCommissionsForDeposit = async (cashinPaymentId, depositorUserId, depositAmount) => {
     const parsedPaymentId = Number(cashinPaymentId);
@@ -5355,13 +7768,43 @@ app.get('/api/admin/withdraw-config', async (_req, res) => {
         catch {
             // coluna já existe
         }
+        try {
+            await db_1.default.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_start_time CHAR(5) NOT NULL DEFAULT '00:00'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        try {
+            await db_1.default.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_end_time CHAR(5) NOT NULL DEFAULT '23:59'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        try {
+            await db_1.default.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_allowed_days VARCHAR(32) NOT NULL DEFAULT '0,1,2,3,4,5,6'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
         const [rows] = await db_1.default.query(`
       SELECT
         id,
         withdraw_fee_percent AS withdrawFeePercent,
         min_withdraw_amount AS minWithdrawAmount,
         max_withdraw_amount AS maxWithdrawAmount,
-        withdraw_auto_approve AS withdrawAutoApprove
+        withdraw_auto_approve AS withdrawAutoApprove,
+        withdraw_start_time AS withdrawStartTime,
+        withdraw_end_time AS withdrawEndTime,
+        withdraw_allowed_days AS withdrawAllowedDays
       FROM system_withdraw_config
       ORDER BY id ASC
       LIMIT 1
@@ -5369,8 +7812,16 @@ app.get('/api/admin/withdraw-config', async (_req, res) => {
         if (rows.length === 0) {
             await db_1.default.query(`
         INSERT INTO system_withdraw_config
-          (withdraw_fee_percent, min_withdraw_amount, max_withdraw_amount, withdraw_auto_approve)
-        VALUES (0.00, 0.00, 0.00, 0)
+          (
+            withdraw_fee_percent,
+            min_withdraw_amount,
+            max_withdraw_amount,
+            withdraw_auto_approve,
+            withdraw_start_time,
+            withdraw_end_time,
+            withdraw_allowed_days
+          )
+        VALUES (0.00, 0.00, 0.00, 0, '00:00', '23:59', '0,1,2,3,4,5,6')
         `);
             res.json({
                 ok: true,
@@ -5379,6 +7830,9 @@ app.get('/api/admin/withdraw-config', async (_req, res) => {
                     minWithdrawAmount: 0,
                     maxWithdrawAmount: 0,
                     withdrawAutoApprove: false,
+                    withdrawStartTime: '00:00',
+                    withdrawEndTime: '23:59',
+                    withdrawAllowedDays: '0,1,2,3,4,5,6',
                 },
             });
             return;
@@ -5391,6 +7845,9 @@ app.get('/api/admin/withdraw-config', async (_req, res) => {
                 minWithdrawAmount: Number(row.minWithdrawAmount ?? 0),
                 maxWithdrawAmount: Number(row.maxWithdrawAmount ?? 0),
                 withdrawAutoApprove: Number(row.withdrawAutoApprove ?? 0) === 1,
+                withdrawStartTime: String(row.withdrawStartTime ?? '00:00'),
+                withdrawEndTime: String(row.withdrawEndTime ?? '23:59'),
+                withdrawAllowedDays: String(row.withdrawAllowedDays ?? '0,1,2,3,4,5,6'),
             },
         });
     }
@@ -5400,10 +7857,17 @@ app.get('/api/admin/withdraw-config', async (_req, res) => {
     }
 });
 app.post('/api/admin/withdraw-config', requireMaxAdmin, async (req, res) => {
-    const { withdrawFeePercent, minWithdrawAmount, maxWithdrawAmount, withdrawAutoApprove } = req.body;
+    const { withdrawFeePercent, minWithdrawAmount, maxWithdrawAmount, withdrawAutoApprove, withdrawStartTime, withdrawEndTime, withdrawAllowedDays } = req.body;
     const fee = Number(String(withdrawFeePercent ?? 0).replace(',', '.'));
     const min = Number(String(minWithdrawAmount ?? 0).replace(',', '.'));
     const max = Number(String(maxWithdrawAmount ?? 0).replace(',', '.'));
+    const start = String(withdrawStartTime ?? '00:00').trim();
+    const end = String(withdrawEndTime ?? '23:59').trim();
+    const allowedDays = String(withdrawAllowedDays ?? '0,1,2,3,4,5,6')
+        .split(',')
+        .map((day) => Number(day.trim()))
+        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6);
+    const normalizedAllowedDays = [...new Set(allowedDays)].sort((a, b) => a - b).join(',');
     const autoApprove = withdrawAutoApprove === true ||
         withdrawAutoApprove === 1 ||
         String(withdrawAutoApprove ?? '').toLowerCase() === 'true'
@@ -5423,6 +7887,15 @@ app.post('/api/admin/withdraw-config', requireMaxAdmin, async (req, res) => {
     }
     if (max > 0 && min > max) {
         res.status(400).json({ ok: false, error: 'Valor mínimo não pode ser maior que o máximo.' });
+        return;
+    }
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!timeRegex.test(start) || !timeRegex.test(end)) {
+        res.status(400).json({ ok: false, error: 'Horário inválido. Use o formato HH:MM.' });
+        return;
+    }
+    if (!normalizedAllowedDays) {
+        res.status(400).json({ ok: false, error: 'Selecione ao menos um dia permitido para saque.' });
         return;
     }
     try {
@@ -5447,6 +7920,33 @@ app.post('/api/admin/withdraw-config', requireMaxAdmin, async (req, res) => {
         catch {
             // coluna já existe
         }
+        try {
+            await db_1.default.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_start_time CHAR(5) NOT NULL DEFAULT '00:00'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        try {
+            await db_1.default.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_end_time CHAR(5) NOT NULL DEFAULT '23:59'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
+        try {
+            await db_1.default.query(`
+        ALTER TABLE system_withdraw_config
+        ADD COLUMN withdraw_allowed_days VARCHAR(32) NOT NULL DEFAULT '0,1,2,3,4,5,6'
+        `);
+        }
+        catch {
+            // coluna já existe
+        }
         const [rows] = await db_1.default.query('SELECT id FROM system_withdraw_config ORDER BY id ASC LIMIT 1');
         const normalizedFee = Number(fee.toFixed(2));
         const normalizedMin = Number(min.toFixed(2));
@@ -5454,9 +7954,17 @@ app.post('/api/admin/withdraw-config', requireMaxAdmin, async (req, res) => {
         if (rows.length === 0) {
             await db_1.default.query(`
         INSERT INTO system_withdraw_config
-          (withdraw_fee_percent, min_withdraw_amount, max_withdraw_amount, withdraw_auto_approve)
-        VALUES (?, ?, ?, ?)
-        `, [normalizedFee, normalizedMin, normalizedMax, autoApprove]);
+          (
+            withdraw_fee_percent,
+            min_withdraw_amount,
+            max_withdraw_amount,
+            withdraw_auto_approve,
+            withdraw_start_time,
+            withdraw_end_time,
+            withdraw_allowed_days
+          )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [normalizedFee, normalizedMin, normalizedMax, autoApprove, start, end, normalizedAllowedDays]);
         }
         else {
             await db_1.default.query(`
@@ -5466,9 +7974,12 @@ app.post('/api/admin/withdraw-config', requireMaxAdmin, async (req, res) => {
           min_withdraw_amount = ?,
           max_withdraw_amount = ?,
           withdraw_auto_approve = ?,
+          withdraw_start_time = ?,
+          withdraw_end_time = ?,
+          withdraw_allowed_days = ?,
           updated_at = NOW()
         WHERE id = ?
-        `, [normalizedFee, normalizedMin, normalizedMax, autoApprove, Number(rows[0].id)]);
+        `, [normalizedFee, normalizedMin, normalizedMax, autoApprove, start, end, normalizedAllowedDays, Number(rows[0].id)]);
         }
         res.json({
             ok: true,
@@ -5478,6 +7989,9 @@ app.post('/api/admin/withdraw-config', requireMaxAdmin, async (req, res) => {
                 minWithdrawAmount: normalizedMin,
                 maxWithdrawAmount: normalizedMax,
                 withdrawAutoApprove: autoApprove === 1,
+                withdrawStartTime: start,
+                withdrawEndTime: end,
+                withdrawAllowedDays: normalizedAllowedDays,
             },
         });
     }
@@ -5645,6 +8159,7 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
       SELECT
         bot_token AS botToken,
         group_id AS groupId,
+        logs_group_id AS logsGroupId,
         welcome_message AS welcomeMessage,
         private_chat_only_message AS privateChatOnlyMessage,
         private_link_success_message AS privateLinkSuccessMessage,
@@ -5662,6 +8177,7 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
                 config: {
                     botToken: '',
                     groupId: '',
+                    logsGroupId: '',
                     welcomeMessage: '',
                     privateChatOnlyMessage: 'Conexão permitida somente no chat privado do bot.',
                     privateLinkSuccessMessage: 'Conta conectada com sucesso.',
@@ -5678,6 +8194,7 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
             config: {
                 botToken: String(rows[0].botToken ?? ''),
                 groupId: String(rows[0].groupId ?? ''),
+                logsGroupId: String(rows[0].logsGroupId ?? ''),
                 welcomeMessage: String(rows[0].welcomeMessage ?? ''),
                 privateChatOnlyMessage: String(rows[0].privateChatOnlyMessage ?? '').trim() ||
                     'Conexão permitida somente no chat privado do bot.',
@@ -5696,9 +8213,10 @@ app.get('/api/admin/telegram-config', requireMaxAdmin, async (_req, res) => {
     }
 });
 app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
-    const { botToken, groupId, welcomeMessage, privateChatOnlyMessage, privateLinkSuccessMessage, alreadyLinkedMessage, checkinSuccessMessage, checkinAlreadyClaimedMessage, } = req.body;
+    const { botToken, groupId, logsGroupId, welcomeMessage, privateChatOnlyMessage, privateLinkSuccessMessage, alreadyLinkedMessage, checkinSuccessMessage, checkinAlreadyClaimedMessage, } = req.body;
     const parsedBotToken = String(botToken ?? '').trim();
     const parsedGroupId = String(groupId ?? '').trim();
+    const parsedLogsGroupId = String(logsGroupId ?? '').trim();
     const parsedWelcomeMessage = String(welcomeMessage ?? '').trim();
     const parsedPrivateChatOnlyMessage = String(privateChatOnlyMessage ?? '').trim() ||
         'Conexão permitida somente no chat privado do bot.';
@@ -5724,6 +8242,7 @@ app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
         singleton_key,
         bot_token,
         group_id,
+        logs_group_id,
         welcome_message,
         private_chat_only_message,
         private_link_success_message,
@@ -5731,10 +8250,11 @@ app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
         checkin_success_message,
         checkin_already_claimed_message
       )
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         bot_token = VALUES(bot_token),
         group_id = VALUES(group_id),
+        logs_group_id = VALUES(logs_group_id),
         welcome_message = VALUES(welcome_message),
         private_chat_only_message = VALUES(private_chat_only_message),
         private_link_success_message = VALUES(private_link_success_message),
@@ -5745,6 +8265,7 @@ app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
       `, [
             parsedBotToken,
             parsedGroupId,
+            parsedLogsGroupId,
             parsedWelcomeMessage,
             parsedPrivateChatOnlyMessage,
             parsedPrivateLinkSuccessMessage,
@@ -5758,6 +8279,7 @@ app.post('/api/admin/telegram-config', requireMaxAdmin, async (req, res) => {
             config: {
                 botToken: parsedBotToken,
                 groupId: parsedGroupId,
+                logsGroupId: parsedLogsGroupId,
                 welcomeMessage: parsedWelcomeMessage,
                 privateChatOnlyMessage: parsedPrivateChatOnlyMessage,
                 privateLinkSuccessMessage: parsedPrivateLinkSuccessMessage,
@@ -5913,43 +8435,85 @@ app.post('/api/admin/site-settings', requireMaxAdmin, async (req, res) => {
 });
 app.get('/api/admin/overview', requireMaxAdmin, async (_req, res) => {
     try {
-        const [activeUsersRows] = await db_1.default.query(`
-      SELECT COUNT(*) AS total
-      FROM users
-      `);
+        // Total de usuários cadastrados
+        const [activeUsersRows] = await db_1.default.query(`SELECT COUNT(*) AS total FROM users`);
+        // Cadastros hoje
+        const [registrationsTodayRows] = await db_1.default.query(`SELECT COUNT(*) AS total FROM users WHERE DATE(created_at) = CURDATE()`);
+        // Depósitos hoje — valor e contagem
         const [depositsTodayRows] = await db_1.default.query(`
-      SELECT COALESCE(SUM(amount), 0) AS total
+      SELECT
+        COALESCE(SUM(amount), 0) AS totalAmount,
+        COUNT(*) AS totalCount
       FROM cashin_payments
       WHERE LOWER(status) IN ('paid', 'payment.paid')
         AND DATE(COALESCE(paid_at, created_at)) = CURDATE()
       `);
+        // Depósitos no mês — valor e contagem
+        const [depositsMonthRows] = await db_1.default.query(`
+      SELECT
+        COALESCE(SUM(amount), 0) AS totalAmount,
+        COUNT(*) AS totalCount
+      FROM cashin_payments
+      WHERE LOWER(status) IN ('paid', 'payment.paid')
+        AND YEAR(COALESCE(paid_at, created_at)) = YEAR(CURDATE())
+        AND MONTH(COALESCE(paid_at, created_at)) = MONTH(CURDATE())
+      `);
         let pendingWithdrawals = 0;
-        let withdrawalsPaid = 0;
+        let withdrawalsTodayCount = 0;
+        let withdrawalsTodayAmount = 0;
+        let withdrawalsMonthCount = 0;
+        let withdrawalsMonthAmount = 0;
+        let withdrawalsPaidTotal = 0;
         try {
-            const [pendingRows] = await db_1.default.query(`
-        SELECT COUNT(*) AS total
-        FROM withdrawals
-        WHERE LOWER(status) IN ('pending', 'processing')
-        `);
+            // Saques pendentes (contagem)
+            const [pendingRows] = await db_1.default.query(`SELECT COUNT(*) AS total FROM withdrawals WHERE LOWER(status) IN ('pending', 'processing')`);
             pendingWithdrawals = Number(pendingRows[0]?.total ?? 0);
-            const [paidRows] = await db_1.default.query(`
-        SELECT COALESCE(SUM(amount), 0) AS total
+            // Saques hoje — valor e contagem (todos os status)
+            const [wdTodayRows] = await db_1.default.query(`
+        SELECT
+          COALESCE(SUM(amount), 0) AS totalAmount,
+          COUNT(*) AS totalCount
         FROM withdrawals
-        WHERE LOWER(status) IN ('paid', 'payment.paid')
+        WHERE DATE(created_at) = CURDATE()
         `);
-            withdrawalsPaid = Number(paidRows[0]?.total ?? 0);
+            withdrawalsTodayCount = Number(wdTodayRows[0]?.totalCount ?? 0);
+            withdrawalsTodayAmount = Number(wdTodayRows[0]?.totalAmount ?? 0);
+            // Saques no mês — valor e contagem (todos os status)
+            const [wdMonthRows] = await db_1.default.query(`
+        SELECT
+          COALESCE(SUM(amount), 0) AS totalAmount,
+          COUNT(*) AS totalCount
+        FROM withdrawals
+        WHERE YEAR(created_at) = YEAR(CURDATE())
+          AND MONTH(created_at) = MONTH(CURDATE())
+        `);
+            withdrawalsMonthCount = Number(wdMonthRows[0]?.totalCount ?? 0);
+            withdrawalsMonthAmount = Number(wdMonthRows[0]?.totalAmount ?? 0);
+            // Total pago para cálculo da receita líquida
+            const [paidRows] = await db_1.default.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM withdrawals WHERE LOWER(status) IN ('paid', 'payment.paid')`);
+            withdrawalsPaidTotal = Number(paidRows[0]?.total ?? 0);
         }
         catch {
-            pendingWithdrawals = 0;
-            withdrawalsPaid = 0;
+            // tabela withdrawals pode não existir ainda
         }
-        const depositsPaid = Number(depositsTodayRows[0]?.total ?? 0);
-        const netRevenue = Number((depositsPaid - withdrawalsPaid).toFixed(2));
+        const depositsTodayAmount = Number(depositsTodayRows[0]?.totalAmount ?? 0);
+        const depositsTodayCount = Number(depositsTodayRows[0]?.totalCount ?? 0);
+        const depositsMonthAmount = Number(depositsMonthRows[0]?.totalAmount ?? 0);
+        const depositsMonthCount = Number(depositsMonthRows[0]?.totalCount ?? 0);
+        const netRevenue = Number((depositsTodayAmount - withdrawalsPaidTotal).toFixed(2));
         res.json({
             ok: true,
             summary: {
                 activeUsers: Number(activeUsersRows[0]?.total ?? 0),
-                depositsToday: depositsPaid,
+                registrationsToday: Number(registrationsTodayRows[0]?.total ?? 0),
+                depositsToday: depositsTodayAmount,
+                depositsTodayCount,
+                depositsMonthAmount,
+                depositsMonthCount,
+                withdrawalsTodayCount,
+                withdrawalsTodayAmount,
+                withdrawalsMonthCount,
+                withdrawalsMonthAmount,
                 pendingWithdrawals,
                 netRevenue,
             },
@@ -7174,6 +9738,71 @@ app.get('/api/admin/logs', requireMaxAdmin, async (req, res) => {
         res.status(500).json({ ok: false, error: 'Falha ao carregar logs administrativos.' });
     }
 });
+app.get('/api/admin/users/:id/withdraw-activation-token-info', requireMaxAdmin, async (req, res) => {
+    const userId = Number(req.params.id);
+    if (!userId || Number.isNaN(userId)) {
+        res.status(400).json({ ok: false, error: 'ID inválido.' });
+        return;
+    }
+    try {
+        const [userRows] = await db_1.default.query(`
+      SELECT id, name, phone
+      FROM users
+      WHERE id = ?
+      LIMIT 1
+      `, [userId]);
+        if (userRows.length === 0) {
+            res.status(404).json({ ok: false, error: 'Usuário não encontrado.' });
+            return;
+        }
+        await ensureWithdrawActivationTokensTable();
+        const [tokenRows] = await db_1.default.query(`
+      SELECT
+        id,
+        user_id AS userId,
+        token,
+        status,
+        telegram_user_id AS telegramUserId,
+        activated_chat_id AS activatedChatId,
+        activated_at AS activatedAt,
+        expires_at AS expiresAt,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM withdraw_activation_tokens
+      WHERE user_id = ?
+      ORDER BY id DESC
+      LIMIT 1
+      `, [userId]);
+        const user = userRows[0];
+        const tokenInfo = tokenRows[0] ?? null;
+        res.json({
+            ok: true,
+            user: {
+                id: Number(user.id),
+                name: String(user.name ?? ''),
+                phone: String(user.phone ?? ''),
+            },
+            tokenInfo: tokenInfo
+                ? {
+                    id: Number(tokenInfo.id ?? 0),
+                    userId: Number(tokenInfo.userId ?? userId),
+                    token: String(tokenInfo.token ?? ''),
+                    status: String(tokenInfo.status ?? ''),
+                    telegramUserId: tokenInfo.telegramUserId == null ? null : String(tokenInfo.telegramUserId),
+                    activatedChatId: tokenInfo.activatedChatId == null ? null : String(tokenInfo.activatedChatId),
+                    activatedAt: tokenInfo.activatedAt ?? null,
+                    expiresAt: tokenInfo.expiresAt ?? null,
+                    createdAt: tokenInfo.createdAt ?? null,
+                    updatedAt: tokenInfo.updatedAt ?? null,
+                }
+                : null,
+        });
+    }
+    catch (err) {
+        console.error('[admin-user-withdraw-activation-token-info]', err);
+        res.status(500).json({ ok: false, error: 'Falha ao carregar token de ativação de saque.' });
+    }
+});
 app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
     const userId = Number(req.params.id);
     if (!userId || Number.isNaN(userId)) {
@@ -7193,7 +9822,9 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         is_admin,
         COALESCE(is_banned, 0) AS is_banned,
         created_at,
-        COALESCE(balance, 0) AS balance
+        COALESCE(balance, 0) AS balance,
+        COALESCE(telegram_conectado, 0) AS telegramConectado,
+        monthly_salary_contract AS activeContract
       FROM users
       WHERE id = ?
       LIMIT 1
@@ -7369,6 +10000,197 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         catch {
             dailyCheckinRedemptions = [];
         }
+        // ── Níveis de comissão com contagem de convidados por nível ────────────────
+        let commissionLevelStats = [];
+        try {
+            await ensureCommissionLevelsTable();
+            const [commLevelRows] = await db_1.default.query(`
+        SELECT
+          id,
+          level,
+          name,
+          commission_percent AS commissionPercent
+        FROM commission_levels
+        WHERE is_active = 1
+        ORDER BY level ASC
+        `);
+            commissionLevelStats = await Promise.all(commLevelRows.map(async (cl) => {
+                const lvl = Number(cl.level ?? 1);
+                try {
+                    // Conta convidados no nível N (referrals recursivos)
+                    const [countRows] = await db_1.default.query(`
+              WITH RECURSIVE referral_tree AS (
+                SELECT id, referred_by_user_id, 1 AS depth
+                FROM users
+                WHERE referred_by_user_id = ?
+
+                UNION ALL
+
+                SELECT u.id, u.referred_by_user_id, rt.depth + 1
+                FROM users u
+                INNER JOIN referral_tree rt ON u.referred_by_user_id = rt.id
+                WHERE rt.depth < ?
+              )
+              SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN EXISTS (
+                  SELECT 1 FROM cashin_payments cp
+                  WHERE cp.user_id = rt.id
+                    AND LOWER(cp.status) IN ('paid', 'payment.paid')
+                ) THEN 1 ELSE 0 END) AS withDeposit
+              FROM referral_tree rt
+              WHERE rt.depth = ?
+              `, [userId, lvl, lvl]);
+                    return {
+                        level: lvl,
+                        name: String(cl.name ?? `Nível ${lvl}`),
+                        commissionPercent: Number(cl.commissionPercent ?? 0),
+                        referralCount: Number(countRows[0]?.total ?? 0),
+                        referralsWithDeposit: Number(countRows[0]?.withDeposit ?? 0),
+                    };
+                }
+                catch {
+                    return {
+                        level: lvl,
+                        name: String(cl.name ?? `Nível ${lvl}`),
+                        commissionPercent: Number(cl.commissionPercent ?? 0),
+                        referralCount: 0,
+                        referralsWithDeposit: 0,
+                    };
+                }
+            }));
+        }
+        catch {
+            commissionLevelStats = [];
+        }
+        // ── Histórico de depósitos ─────────────────────────────────────────────────
+        let depositHistory = [];
+        try {
+            const [depositHistRows] = await db_1.default.query(`
+        SELECT
+          id,
+          amount,
+          status,
+          method,
+          provider_transaction_id AS externalId,
+          paid_at   AS paidAt,
+          created_at AS createdAt
+        FROM cashin_payments
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 200
+        `, [userId]);
+            depositHistory = depositHistRows.map((row) => ({
+                id: Number(row.id),
+                amount: Number(row.amount ?? 0),
+                status: String(row.status ?? 'pending'),
+                method: String(row.method ?? 'pix'),
+                externalId: row.externalId ? String(row.externalId) : null,
+                paidAt: row.paidAt ? String(row.paidAt) : null,
+                createdAt: row.createdAt ? String(row.createdAt) : null,
+            }));
+        }
+        catch {
+            depositHistory = [];
+        }
+        // ── Histórico de saques ────────────────────────────────────────────────────
+        let withdrawalHistory = [];
+        try {
+            const [withdrawHistRows] = await db_1.default.query(`
+        SELECT
+          id,
+          amount,
+          status,
+          holder_name  AS holderName,
+          pix_key_type AS pixKeyType,
+          pix_key      AS pixKey,
+          external_id  AS externalId,
+          paid_at      AS paidAt,
+          created_at   AS createdAt
+        FROM withdrawals
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 200
+        `, [userId]).catch(() => [[]]);
+            withdrawalHistory = withdrawHistRows.map((row) => ({
+                id: Number(row.id),
+                amount: Number(row.amount ?? 0),
+                status: String(row.status ?? 'pending'),
+                holderName: String(row.holderName ?? ''),
+                pixKeyType: String(row.pixKeyType ?? ''),
+                pixKey: String(row.pixKey ?? ''),
+                externalId: row.externalId ? String(row.externalId) : null,
+                paidAt: row.paidAt ? String(row.paidAt) : null,
+                createdAt: row.createdAt ? String(row.createdAt) : null,
+            }));
+        }
+        catch {
+            withdrawalHistory = [];
+        }
+        // ── Giros da roleta realizados ──────────────────────────────────────────────
+        let rouletteSpins = [];
+        try {
+            await db_1.default.query(`
+        CREATE TABLE IF NOT EXISTS roulette_spins (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          user_id BIGINT UNSIGNED NOT NULL,
+          prize_label VARCHAR(80) NOT NULL,
+          prize_index INT NOT NULL,
+          rotation_final DECIMAL(12,4) NOT NULL DEFAULT 0,
+          source VARCHAR(30) NOT NULL DEFAULT 'roleta_page',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          KEY idx_roulette_spins_user_id (user_id),
+          KEY idx_roulette_spins_created_at (created_at)
+        )
+      `).catch(() => null);
+            const [spinRows] = await db_1.default.query(`
+        SELECT
+          id,
+          prize_label  AS prizeLabel,
+          prize_index  AS prizeIndex,
+          source,
+          created_at   AS createdAt
+        FROM roulette_spins
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 100
+        `, [userId]);
+            rouletteSpins = spinRows.map((row) => ({
+                id: Number(row.id),
+                prizeLabel: String(row.prizeLabel ?? ''),
+                prizeIndex: Number(row.prizeIndex ?? 0),
+                source: String(row.source ?? 'roleta_page'),
+                createdAt: row.createdAt ? String(row.createdAt) : null,
+            }));
+        }
+        catch {
+            rouletteSpins = [];
+        }
+        // ── Saldo de giros (earned / used / available) ──────────────────────────────
+        let rouletteSpinBalance = { availableSpins: 0, totalEarned: 0, totalUsed: 0 };
+        try {
+            await ensureUserRouletteSpinsTable();
+            const [balanceRows] = await db_1.default.query(`
+        SELECT
+          available_spins AS availableSpins,
+          total_earned    AS totalEarned,
+          total_used      AS totalUsed
+        FROM user_roulette_spins
+        WHERE user_id = ?
+        LIMIT 1
+        `, [userId]);
+            if (balanceRows.length > 0) {
+                rouletteSpinBalance = {
+                    availableSpins: Number(balanceRows[0].availableSpins ?? 0),
+                    totalEarned: Number(balanceRows[0].totalEarned ?? 0),
+                    totalUsed: Number(balanceRows[0].totalUsed ?? 0),
+                };
+            }
+        }
+        catch {
+            rouletteSpinBalance = { availableSpins: 0, totalEarned: 0, totalUsed: 0 };
+        }
         const buildMembersByLevel = async (level) => {
             const [rows] = await db_1.default.query(`
         WITH RECURSIVE referral_tree AS (
@@ -7441,6 +10263,8 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
                 is_banned: Number(user.is_banned ?? 0),
                 created_at: user.created_at,
                 balance: Number(user.balance ?? 0),
+                telegramConectado: Number(user.telegramConectado ?? 0),
+                activeContract: user.activeContract == null ? null : String(user.activeContract),
                 totalDepositsPaid: Number(depositRows[0]?.total ?? 0),
                 totalWithdrawals,
                 totalCyclePlansBought,
@@ -7450,6 +10274,11 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
                 cyclePurchases,
                 giftCodeRedemptions,
                 dailyCheckinRedemptions,
+                depositHistory,
+                withdrawalHistory,
+                commissionLevelStats,
+                rouletteSpins,
+                rouletteSpinBalance,
                 referralsLevel1,
                 referralsLevel2,
                 referralsLevel3,
@@ -7467,18 +10296,31 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (error) => {
     console.error('[uncaughtException]', error);
 });
-app.use((req, _res, next) => {
-    const startedAt = Date.now();
-    const requestId = Math.random().toString(36).slice(2, 10);
-    console.log(`[http] -> id=${requestId} ${req.method} ${req.originalUrl}`);
-    _res.on('finish', () => {
-        const ms = Date.now() - startedAt;
-        console.log(`[http] <- id=${requestId} ${req.method} ${req.originalUrl} status=${_res.statusCode} ${ms}ms`);
-    });
-    next();
+// ─── 404 — rota não encontrada ───────────────────────────────────────────────
+app.use((req, res) => {
+    console.warn(`[404] ${req.method} ${req.originalUrl} — rota não encontrada`);
+    res.status(404).json({ ok: false, error: `Rota não encontrada: ${req.method} ${req.originalUrl}` });
+});
+// ─── Erro global — captura qualquer exceção não tratada nas rotas ─────────────
+app.use((err, req, res, _next) => {
+    console.error(`[500] ${req.method} ${req.originalUrl}`, err);
+    res.status(500).json({ ok: false, error: 'Erro interno do servidor.' });
 });
 io.on('connection', (socket) => {
     console.log(`[ws] client connected: ${socket.id}`);
+    // Envia o count atual + lista de IDs imediatamente para o cliente que acabou de conectar
+    const cutoff = Date.now() - PRESENCE_TTL_MS;
+    let currentCount = 0;
+    const currentOnlineIds = [];
+    for (const [key, ts] of onlinePresence.entries()) {
+        if (ts >= cutoff) {
+            currentCount++;
+            const num = Number(key);
+            if (!isNaN(num) && num > 0)
+                currentOnlineIds.push(num);
+        }
+    }
+    socket.emit('online-count', { onlineCount: currentCount, onlineUserIds: currentOnlineIds });
     socket.on('telegram:subscribe', (payload) => {
         const userId = Number(payload?.userId ?? 0);
         if (!userId || Number.isNaN(userId))
