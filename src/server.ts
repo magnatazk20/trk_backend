@@ -1780,10 +1780,39 @@ const bootstrapDatabase = async () => {
   await ensureWithdrawActivationTokensTable()
   await ensureCommissionLevelsTable()
   await ensureVipAndMiningTables()
+
+  // ── Saldo da loja (shop_balance) — separado do saldo da plataforma ─────────
+  try {
+    await pool.query(`ALTER TABLE users ADD COLUMN shop_balance DECIMAL(12,2) NOT NULL DEFAULT 0`)
+    console.log('[bootstrap-database] shop_balance column added to users')
+  } catch {
+    // coluna já existe
+  }
+
+  // ── Tabela de transações do saldo da loja ─────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS shop_balance_transactions (
+      id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id       BIGINT UNSIGNED NOT NULL,
+      type          ENUM('credit','debit') NOT NULL,
+      amount        DECIMAL(12,2) NOT NULL,
+      reason        VARCHAR(255) NOT NULL DEFAULT '',
+      reference_id  VARCHAR(120) NULL,
+      old_balance   DECIMAL(12,2) NULL,
+      new_balance   DECIMAL(12,2) NULL,
+      created_by    BIGINT UNSIGNED NULL COMMENT 'admin user_id que creditou, NULL se sistema',
+      created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_sbt_user (user_id),
+      KEY idx_sbt_created (created_at)
+    )
+  `)
+
   console.log('[bootstrap-database] telegram config e conexões garantidas')
   console.log('[bootstrap-database] withdraw_activation_tokens table ensured')
   console.log('[bootstrap-database] commission_levels table ensured')
   console.log('[bootstrap-database] vip/mining tables ensured')
+  console.log('[bootstrap-database] shop_balance e shop_balance_transactions garantidos')
 }
 
 bootstrapDatabase().catch((err) => {
@@ -2382,7 +2411,7 @@ app.get('/api/user/summary/:id', async (req, res) => {
     }
 
     const [rows] = await pool.query<RowDataPacket[]>(
-      'SELECT balance, total_deposits, monthly_salary_contract AS monthlySalaryContract FROM users WHERE id = ?',
+      'SELECT balance, shop_balance, total_deposits, monthly_salary_contract AS monthlySalaryContract FROM users WHERE id = ?',
       [userId]
     )
 
@@ -2393,12 +2422,14 @@ app.get('/api/user/summary/:id', async (req, res) => {
 
     const row = rows[0] as {
       balance: number | string
+      shop_balance: number | string
       total_deposits: number | string
       monthlySalaryContract?: string | null
     }
 
     res.json({
       balance: Number(row.balance ?? 0),
+      shopBalance: Number(row.shop_balance ?? 0),
       totalDeposits: Number(row.total_deposits ?? 0),
       monthlySalaryContract: row.monthlySalaryContract == null ? null : String(row.monthlySalaryContract),
     })
@@ -2688,7 +2719,7 @@ app.post('/api/CASHIN/webhook', express.raw({ type: '*/*' }), async (req, res) =
 
           const referredByUserId = Number(depositorRows[0]?.referredByUserId ?? 0)
           if (referredByUserId > 0) {
-            // Giro só é concedido no PRIMEIRO depósito do indicado (nível 1)
+            // Giro na roleta só é concedido no PRIMEIRO depósito do indicado (nível 1)
             const [prevDepositsRows] = await pool.query<RowDataPacket[]>(
               `
               SELECT COUNT(*) AS total
@@ -2714,6 +2745,23 @@ app.post('/api/CASHIN/webhook', express.raw({ type: '*/*' }), async (req, res) =
                 [referredByUserId]
               )
             }
+          }
+
+          // Concede 1 giro na Caixa Box ao próprio depositante se depositar R$50 ou mais
+          const depositAmount = Number(existing.amount ?? amountBRL)
+          if (depositAmount >= 50) {
+            await ensureCaixasBoxTables()
+            await pool.query(
+              `
+              INSERT INTO user_caixas_box_spins (user_id, available_spins, total_earned, total_used)
+              VALUES (?, 1, 1, 0)
+              ON DUPLICATE KEY UPDATE
+                available_spins = COALESCE(available_spins, 0) + 1,
+                total_earned = COALESCE(total_earned, 0) + 1,
+                updated_at = NOW()
+              `,
+              [Number(existing.user_id)]
+            )
           }
 
           await applyReferralCommissionsForDeposit(
@@ -2778,7 +2826,7 @@ app.post('/api/CASHIN/webhook', express.raw({ type: '*/*' }), async (req, res) =
 
         const referredByUserId = Number(depositorRows[0]?.referredByUserId ?? 0)
         if (referredByUserId > 0) {
-          // Giro só é concedido no PRIMEIRO depósito do indicado (nível 1)
+          // Giro na roleta só é concedido no PRIMEIRO depósito do indicado (nível 1)
           const [prevDepositsRows2] = await pool.query<RowDataPacket[]>(
             `
             SELECT COUNT(*) AS total
@@ -2804,6 +2852,22 @@ app.post('/api/CASHIN/webhook', express.raw({ type: '*/*' }), async (req, res) =
               [referredByUserId]
             )
           }
+        }
+
+        // Concede 1 giro na Caixa Box ao próprio depositante se depositar R$50 ou mais
+        if (amountBRL >= 50) {
+          await ensureCaixasBoxTables()
+          await pool.query(
+            `
+            INSERT INTO user_caixas_box_spins (user_id, available_spins, total_earned, total_used)
+            VALUES (?, 1, 1, 0)
+            ON DUPLICATE KEY UPDATE
+              available_spins = COALESCE(available_spins, 0) + 1,
+              total_earned = COALESCE(total_earned, 0) + 1,
+              updated_at = NOW()
+            `,
+            [userId]
+          )
         }
 
         const [createdRows] = await pool.query<RowDataPacket[]>(
@@ -12958,6 +13022,733 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (error) => {
   console.error('[uncaughtException]', error)
+})
+
+// ─── Caixas Box ──────────────────────────────────────────────────────────────
+
+const DEFAULT_CAIXAS_BOX_PRIZES = [
+  { prizeKey: 'iphone',    label: 'iPhone',       type: 'physical', value: 0,  probability: 1,  sortOrder: 0, isActive: 1 },
+  { prizeKey: 'caixa_som', label: 'Caixa de Som', type: 'physical', value: 0,  probability: 4,  sortOrder: 1, isActive: 1 },
+  { prizeKey: 'r50',       label: 'R$ 50,00',     type: 'cash',     value: 50, probability: 5,  sortOrder: 2, isActive: 1 },
+  { prizeKey: 'r20',       label: 'R$ 20,00',     type: 'cash',     value: 20, probability: 10, sortOrder: 3, isActive: 1 },
+  { prizeKey: 'r10',       label: 'R$ 10,00',     type: 'cash',     value: 10, probability: 15, sortOrder: 4, isActive: 1 },
+  { prizeKey: 'r5',        label: 'R$ 5,00',      type: 'cash',     value: 5,  probability: 25, sortOrder: 5, isActive: 1 },
+  { prizeKey: 'r1',        label: 'R$ 1,00',      type: 'cash',     value: 1,  probability: 40, sortOrder: 6, isActive: 1 },
+]
+
+const ensureCaixasBoxTables = async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_caixas_box_spins (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      available_spins INT NOT NULL DEFAULT 0,
+      total_earned INT NOT NULL DEFAULT 0,
+      total_used INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_caixas_box_user (user_id)
+    )
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS caixas_box_results (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      prize_id VARCHAR(30) NOT NULL,
+      prize_label VARCHAR(80) NOT NULL,
+      prize_type VARCHAR(20) NOT NULL DEFAULT 'cash',
+      prize_value DECIMAL(12,2) NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_caixas_box_user (user_id),
+      KEY idx_caixas_box_created (created_at)
+    )
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS caixas_box_prizes (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      prize_key VARCHAR(40) NOT NULL,
+      label VARCHAR(120) NOT NULL,
+      type VARCHAR(20) NOT NULL DEFAULT 'cash',
+      value DECIMAL(12,2) NOT NULL DEFAULT 0,
+      probability DECIMAL(8,4) NOT NULL DEFAULT 0,
+      sort_order INT NOT NULL DEFAULT 0,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      image_url VARCHAR(500) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_caixas_box_prizes_key (prize_key)
+    )
+  `)
+  // Adiciona image_url se a coluna ainda não existir (migração para tabelas existentes)
+  try {
+    await pool.query(`ALTER TABLE caixas_box_prizes ADD COLUMN image_url VARCHAR(500) NULL`)
+  } catch (_) { /* coluna já existe */ }
+  // Insere defaults se tabela vazia
+  const [countRows] = await pool.query<RowDataPacket[]>('SELECT COUNT(*) AS total FROM caixas_box_prizes')
+  const total = Number((countRows as RowDataPacket[])[0]?.total ?? 0)
+  if (total === 0) {
+    for (const p of DEFAULT_CAIXAS_BOX_PRIZES) {
+      await pool.query(
+        `INSERT IGNORE INTO caixas_box_prizes (prize_key, label, type, value, probability, sort_order, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [p.prizeKey, p.label, p.type, p.value, p.probability, p.sortOrder, p.isActive]
+      )
+    }
+  }
+}
+
+async function loadActiveCaixasBoxPrizes() {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, prize_key AS prizeKey, label, type, value, probability, sort_order AS sortOrder, is_active AS isActive, image_url AS imageUrl
+     FROM caixas_box_prizes WHERE is_active = 1 ORDER BY sort_order ASC, id ASC`
+  )
+  return rows.map((r) => ({
+    id: Number(r.id),
+    id_db: Number(r.id),
+    prizeKey: String(r.prizeKey),
+    label: String(r.label),
+    type: String(r.type),
+    value: Number(r.value),
+    probability: Number(r.probability),
+    sortOrder: Number(r.sortOrder),
+    isActive: Number(r.isActive) === 1,
+    imageUrl: r.imageUrl ? String(r.imageUrl) : null,
+  }))
+}
+
+function weightedRandomBox(items: Array<{ prizeKey: string; label: string; type: string; value: number; probability: number }>) {
+  const total = items.reduce((acc, i) => acc + i.probability, 0)
+  let rand = Math.random() * total
+  for (const item of items) {
+    rand -= item.probability
+    if (rand <= 0) return item
+  }
+  return items[items.length - 1]
+}
+
+// ── Admin: CRUD de prêmios ────────────────────────────────────────────────────
+
+// GET /api/admin/caixas-box/prizes — todos os prêmios (admin)
+app.get('/api/admin/caixas-box/prizes', requireMaxAdmin, async (_req: AuthenticatedRequest, res) => {
+  try {
+    await ensureCaixasBoxTables()
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, prize_key AS prizeKey, label, type, value, probability, sort_order AS sortOrder, is_active AS isActive, image_url AS imageUrl, created_at AS createdAt
+       FROM caixas_box_prizes ORDER BY sort_order ASC, id ASC`
+    )
+    res.json({
+      ok: true,
+      prizes: rows.map((r) => ({
+        id: Number(r.id),
+        prizeKey: String(r.prizeKey),
+        label: String(r.label),
+        type: String(r.type),
+        value: Number(r.value),
+        probability: Number(r.probability),
+        sortOrder: Number(r.sortOrder),
+        isActive: Number(r.isActive) === 1,
+        imageUrl: r.imageUrl ? String(r.imageUrl) : '',
+        createdAt: r.createdAt,
+      })),
+    })
+  } catch (err) {
+    console.error('[admin-caixas-box-prizes-list]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao listar prêmios.' })
+  }
+})
+
+// POST /api/admin/caixas-box/prizes — cria novo prêmio
+app.post('/api/admin/caixas-box/prizes', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
+  const { prizeKey, label, type, value, probability, sortOrder, isActive, imageUrl } = req.body as {
+    prizeKey?: string; label?: string; type?: string; value?: number; probability?: number; sortOrder?: number; isActive?: boolean; imageUrl?: string
+  }
+  if (!prizeKey || !label) {
+    res.status(400).json({ ok: false, error: 'prizeKey e label são obrigatórios.' })
+    return
+  }
+  try {
+    await ensureCaixasBoxTables()
+    const parsedImageUrl = String(imageUrl ?? '').trim() || null
+    await pool.query(
+      `INSERT INTO caixas_box_prizes (prize_key, label, type, value, probability, sort_order, is_active, image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        String(prizeKey).trim(),
+        String(label).trim(),
+        String(type ?? 'cash').trim(),
+        Number(value ?? 0),
+        Number(probability ?? 0),
+        Number(sortOrder ?? 0),
+        (isActive ?? true) ? 1 : 0,
+        parsedImageUrl,
+      ]
+    )
+    res.json({ ok: true, message: 'Prêmio criado com sucesso.' })
+  } catch (err: any) {
+    if (String(err?.code ?? '') === 'ER_DUP_ENTRY') {
+      res.status(409).json({ ok: false, error: 'Já existe um prêmio com esse prizeKey.' })
+      return
+    }
+    console.error('[admin-caixas-box-prizes-create]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao criar prêmio.' })
+  }
+})
+
+// PUT /api/admin/caixas-box/prizes/:id — edita um prêmio
+app.put('/api/admin/caixas-box/prizes/:id', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
+  const id = Number(req.params.id)
+  if (!id || Number.isNaN(id)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+  const { label, type, value, probability, sortOrder, isActive, imageUrl } = req.body as {
+    label?: string; type?: string; value?: number; probability?: number; sortOrder?: number; isActive?: boolean; imageUrl?: string
+  }
+  try {
+    await ensureCaixasBoxTables()
+    const parsedImageUrl = String(imageUrl ?? '').trim() || null
+    await pool.query(
+      `UPDATE caixas_box_prizes SET label = ?, type = ?, value = ?, probability = ?, sort_order = ?, is_active = ?, image_url = ?, updated_at = NOW() WHERE id = ?`,
+      [
+        String(label ?? '').trim(),
+        String(type ?? 'cash').trim(),
+        Number(value ?? 0),
+        Number(probability ?? 0),
+        Number(sortOrder ?? 0),
+        (isActive ?? true) ? 1 : 0,
+        parsedImageUrl,
+        id,
+      ]
+    )
+    res.json({ ok: true, message: 'Prêmio atualizado com sucesso.' })
+  } catch (err) {
+    console.error('[admin-caixas-box-prizes-update]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao atualizar prêmio.' })
+  }
+})
+
+// DELETE /api/admin/caixas-box/prizes/:id — remove um prêmio
+app.delete('/api/admin/caixas-box/prizes/:id', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
+  const id = Number(req.params.id)
+  if (!id || Number.isNaN(id)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+  try {
+    await ensureCaixasBoxTables()
+    await pool.query('DELETE FROM caixas_box_prizes WHERE id = ?', [id])
+    res.json({ ok: true, message: 'Prêmio removido com sucesso.' })
+  } catch (err) {
+    console.error('[admin-caixas-box-prizes-delete]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao remover prêmio.' })
+  }
+})
+
+// GET /api/admin/caixas-box/stats — estatísticas gerais
+app.get('/api/admin/caixas-box/stats', requireMaxAdmin, async (_req: AuthenticatedRequest, res) => {
+  try {
+    await ensureCaixasBoxTables()
+    const [totalSpinsRows] = await pool.query<RowDataPacket[]>(
+      'SELECT COALESCE(SUM(total_used), 0) AS totalOpened, COALESCE(SUM(available_spins), 0) AS totalPending FROM user_caixas_box_spins'
+    )
+    const [prizesRows] = await pool.query<RowDataPacket[]>(
+      `SELECT prize_label AS prizeLabel, COUNT(*) AS count FROM caixas_box_results GROUP BY prize_label ORDER BY count DESC`
+    )
+    res.json({
+      ok: true,
+      stats: {
+        totalOpened: Number(totalSpinsRows[0]?.totalOpened ?? 0),
+        totalPending: Number(totalSpinsRows[0]?.totalPending ?? 0),
+        byPrize: prizesRows.map((r) => ({ prizeLabel: String(r.prizeLabel), count: Number(r.count) })),
+      },
+    })
+  } catch (err) {
+    console.error('[admin-caixas-box-stats]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar estatísticas.' })
+  }
+})
+
+// ── Endpoints públicos/usuário ────────────────────────────────────────────────
+
+// GET /api/caixas-box/spins/:userId — giros disponíveis
+app.get('/api/caixas-box/spins/:userId', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = Number(req.params.userId)
+  if (!userId || Number.isNaN(userId)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+  try {
+    await ensureCaixasBoxTables()
+    const [rows] = await pool.query<RowDataPacket[]>(
+      'SELECT available_spins AS availableSpins, total_earned AS totalEarned, total_used AS totalUsed FROM user_caixas_box_spins WHERE user_id = ? LIMIT 1',
+      [userId]
+    )
+    res.json({
+      ok: true,
+      availableSpins: Number(rows[0]?.availableSpins ?? 0),
+      totalEarned: Number(rows[0]?.totalEarned ?? 0),
+      totalUsed: Number(rows[0]?.totalUsed ?? 0),
+    })
+  } catch (err) {
+    console.error('[caixas-box-spins]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar giros.' })
+  }
+})
+
+// GET /api/caixas-box/prizes — lista de prêmios ativos
+app.get('/api/caixas-box/prizes', async (_req, res) => {
+  try {
+    await ensureCaixasBoxTables()
+    const prizes = await loadActiveCaixasBoxPrizes()
+    // Compatibilidade: retorna 'id' como prizeKey para o frontend legacy
+    res.json({ ok: true, prizes: prizes.map((p) => ({ ...p, id: p.prizeKey })) })
+  } catch (err) {
+    console.error('[caixas-box-prizes]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar prêmios.' })
+  }
+})
+
+// POST /api/caixas-box/open — abre uma caixa (consome 1 giro)
+app.post('/api/caixas-box/open', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const { userId } = req.body as { userId?: number }
+  const parsedUserId = Number(userId)
+  if (!parsedUserId || Number.isNaN(parsedUserId)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+
+  await ensureCaixasBoxTables()
+  const activePrizes = await loadActiveCaixasBoxPrizes()
+  if (activePrizes.length === 0) {
+    res.status(400).json({ ok: false, error: 'Nenhum prêmio ativo configurado.' })
+    return
+  }
+
+  const picked = weightedRandomBox(activePrizes)
+
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [spinRows] = await conn.query<RowDataPacket[]>(
+      'SELECT available_spins AS availableSpins FROM user_caixas_box_spins WHERE user_id = ? LIMIT 1 FOR UPDATE',
+      [parsedUserId]
+    )
+    const availableSpins = Number(spinRows[0]?.availableSpins ?? 0)
+    if (availableSpins <= 0) {
+      await conn.rollback()
+      res.status(400).json({ ok: false, error: 'Você não possui giros na Caixa Box.' })
+      return
+    }
+
+    await conn.query(
+      `UPDATE user_caixas_box_spins SET available_spins = available_spins - 1, total_used = total_used + 1, updated_at = NOW() WHERE user_id = ?`,
+      [parsedUserId]
+    )
+
+    await conn.query(
+      `INSERT INTO caixas_box_results (user_id, prize_id, prize_label, prize_type, prize_value) VALUES (?, ?, ?, ?, ?)`,
+      [parsedUserId, picked.prizeKey, picked.label, picked.type, picked.value]
+    )
+
+    const [resultRows] = await conn.query<RowDataPacket[]>('SELECT LAST_INSERT_ID() AS insertId')
+    const insertId = Number((resultRows as RowDataPacket[])[0]?.insertId ?? 0)
+
+    if (picked.type === 'cash' && picked.value > 0) {
+      await conn.query(
+        `UPDATE users SET balance = COALESCE(balance, 0) + ? WHERE id = ?`,
+        [picked.value, parsedUserId]
+      )
+    }
+
+    await conn.commit()
+
+    res.json({
+      ok: true,
+      prize: {
+        id: insertId,
+        prizeId: picked.prizeKey,
+        prizeLabel: picked.label,
+        prizeType: picked.type,
+        prizeValue: picked.value,
+        imageUrl: picked.imageUrl ?? null,
+      },
+      availableSpinsAfter: Math.max(availableSpins - 1, 0),
+    })
+
+    sendTelegramLog(
+      `📦 <b>Caixa Box Aberta</b>\n` +
+      `👤 Usuário ID: <code>${parsedUserId}</code>\n` +
+      `🏆 Prêmio: <b>${picked.label}</b>\n` +
+      `💰 Valor: R$ ${Number(picked.value.toFixed(2)).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}\n` +
+      `📅 ${new Date().toLocaleString('pt-BR')}`
+    ).catch(() => {})
+  } catch (err) {
+    await conn.rollback()
+    console.error('[caixas-box-open]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao abrir caixa.' })
+  } finally {
+    conn.release()
+  }
+})
+
+// GET /api/caixas-box/history/:userId — histórico de aberturas
+app.get('/api/caixas-box/history/:userId', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = Number(req.params.userId)
+  if (!userId || Number.isNaN(userId)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+  try {
+    await ensureCaixasBoxTables()
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, prize_id AS prizeId, prize_label AS prizeLabel, prize_type AS prizeType, prize_value AS prizeValue, created_at AS createdAt
+       FROM caixas_box_results WHERE user_id = ? ORDER BY id DESC LIMIT 50`,
+      [userId]
+    )
+    res.json({
+      ok: true,
+      history: rows.map((r) => ({
+        id: Number(r.id),
+        prizeId: String(r.prizeId),
+        prizeLabel: String(r.prizeLabel),
+        prizeType: String(r.prizeType),
+        prizeValue: Number(r.prizeValue),
+        createdAt: r.createdAt,
+      })),
+    })
+  } catch (err) {
+    console.error('[caixas-box-history]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar histórico.' })
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// SALDO DA LOJA (shop_balance) — separado do saldo da plataforma
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/shop/balance/:userId — consulta saldo da loja do usuário
+app.get('/api/shop/balance/:userId', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = Number(req.params.userId)
+  if (!userId || Number.isNaN(userId)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      'SELECT shop_balance AS shopBalance FROM users WHERE id = ? LIMIT 1',
+      [userId]
+    )
+    if (rows.length === 0) {
+      res.status(404).json({ ok: false, error: 'Usuário não encontrado.' })
+      return
+    }
+    res.json({ ok: true, shopBalance: Number(rows[0].shopBalance ?? 0) })
+  } catch (err) {
+    console.error('[shop-balance-get]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao consultar saldo da loja.' })
+  }
+})
+
+// GET /api/shop/balance/:userId/history — histórico de transações do saldo da loja
+app.get('/api/shop/balance/:userId/history', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = Number(req.params.userId)
+  if (!userId || Number.isNaN(userId)) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, type, amount, reason, reference_id AS referenceId,
+              old_balance AS oldBalance, new_balance AS newBalance, created_at AS createdAt
+       FROM shop_balance_transactions
+       WHERE user_id = ?
+       ORDER BY id DESC
+       LIMIT 50`,
+      [userId]
+    )
+    res.json({
+      ok: true,
+      history: rows.map((r) => ({
+        id: Number(r.id),
+        type: String(r.type),
+        amount: Number(r.amount),
+        reason: String(r.reason ?? ''),
+        referenceId: r.referenceId ? String(r.referenceId) : null,
+        oldBalance: Number(r.oldBalance ?? 0),
+        newBalance: Number(r.newBalance ?? 0),
+        createdAt: r.createdAt,
+      })),
+    })
+  } catch (err) {
+    console.error('[shop-balance-history]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar histórico.' })
+  }
+})
+
+// POST /api/admin/shop/balance/credit — admin credita saldo da loja para um usuário
+app.post('/api/admin/shop/balance/credit', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
+  const { userId, amount, reason, referenceId } = req.body as {
+    userId?: number
+    amount?: number
+    reason?: string
+    referenceId?: string
+  }
+
+  const parsedUserId = Number(userId)
+  const parsedAmount = Number(String(amount ?? '0').replace(',', '.'))
+
+  if (!parsedUserId || Number.isNaN(parsedUserId)) {
+    res.status(400).json({ ok: false, error: 'userId inválido.' })
+    return
+  }
+  if (!parsedAmount || parsedAmount <= 0 || Number.isNaN(parsedAmount)) {
+    res.status(400).json({ ok: false, error: 'Valor inválido. Deve ser maior que zero.' })
+    return
+  }
+
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [userRows] = await conn.query<RowDataPacket[]>(
+      'SELECT id, shop_balance AS shopBalance FROM users WHERE id = ? LIMIT 1 FOR UPDATE',
+      [parsedUserId]
+    )
+    if (userRows.length === 0) {
+      await conn.rollback()
+      res.status(404).json({ ok: false, error: 'Usuário não encontrado.' })
+      return
+    }
+
+    const oldBalance = Number(userRows[0].shopBalance ?? 0)
+    const newBalance = oldBalance + parsedAmount
+
+    await conn.query(
+      'UPDATE users SET shop_balance = ? WHERE id = ?',
+      [newBalance, parsedUserId]
+    )
+
+    await conn.query(
+      `INSERT INTO shop_balance_transactions
+       (user_id, type, amount, reason, reference_id, old_balance, new_balance, created_by)
+       VALUES (?, 'credit', ?, ?, ?, ?, ?, ?)`,
+      [
+        parsedUserId,
+        parsedAmount,
+        String(reason ?? 'Crédito manual pelo admin').trim(),
+        referenceId ? String(referenceId).trim() : null,
+        oldBalance,
+        newBalance,
+        req.authUser?.id ?? null,
+      ]
+    )
+
+    await conn.commit()
+    res.json({
+      ok: true,
+      message: `Saldo da loja creditado com sucesso.`,
+      shopBalance: newBalance,
+      credited: parsedAmount,
+    })
+  } catch (err) {
+    await conn.rollback()
+    console.error('[admin-shop-balance-credit]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao creditar saldo da loja.' })
+  } finally {
+    conn.release()
+  }
+})
+
+// POST /api/admin/shop/balance/debit — admin debita saldo da loja (ajuste/correção)
+app.post('/api/admin/shop/balance/debit', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
+  const { userId, amount, reason, referenceId } = req.body as {
+    userId?: number
+    amount?: number
+    reason?: string
+    referenceId?: string
+  }
+
+  const parsedUserId = Number(userId)
+  const parsedAmount = Number(String(amount ?? '0').replace(',', '.'))
+
+  if (!parsedUserId || Number.isNaN(parsedUserId)) {
+    res.status(400).json({ ok: false, error: 'userId inválido.' })
+    return
+  }
+  if (!parsedAmount || parsedAmount <= 0 || Number.isNaN(parsedAmount)) {
+    res.status(400).json({ ok: false, error: 'Valor inválido. Deve ser maior que zero.' })
+    return
+  }
+
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [userRows] = await conn.query<RowDataPacket[]>(
+      'SELECT id, shop_balance AS shopBalance FROM users WHERE id = ? LIMIT 1 FOR UPDATE',
+      [parsedUserId]
+    )
+    if (userRows.length === 0) {
+      await conn.rollback()
+      res.status(404).json({ ok: false, error: 'Usuário não encontrado.' })
+      return
+    }
+
+    const oldBalance = Number(userRows[0].shopBalance ?? 0)
+    if (parsedAmount > oldBalance) {
+      await conn.rollback()
+      res.status(400).json({ ok: false, error: `Saldo insuficiente. Saldo atual: R$ ${oldBalance.toFixed(2)}` })
+      return
+    }
+
+    const newBalance = oldBalance - parsedAmount
+
+    await conn.query(
+      'UPDATE users SET shop_balance = ? WHERE id = ?',
+      [newBalance, parsedUserId]
+    )
+
+    await conn.query(
+      `INSERT INTO shop_balance_transactions
+       (user_id, type, amount, reason, reference_id, old_balance, new_balance, created_by)
+       VALUES (?, 'debit', ?, ?, ?, ?, ?, ?)`,
+      [
+        parsedUserId,
+        parsedAmount,
+        String(reason ?? 'Débito manual pelo admin').trim(),
+        referenceId ? String(referenceId).trim() : null,
+        oldBalance,
+        newBalance,
+        req.authUser?.id ?? null,
+      ]
+    )
+
+    await conn.commit()
+    res.json({
+      ok: true,
+      message: `Saldo da loja debitado com sucesso.`,
+      shopBalance: newBalance,
+      debited: parsedAmount,
+    })
+  } catch (err) {
+    await conn.rollback()
+    console.error('[admin-shop-balance-debit]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao debitar saldo da loja.' })
+  } finally {
+    conn.release()
+  }
+})
+
+// GET /api/admin/shop/balance/users — lista usuários com saldo da loja > 0 (admin)
+app.get('/api/admin/shop/balance/users', requireMaxAdmin, async (_req: AuthenticatedRequest, res) => {
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, name, phone, shop_balance AS shopBalance
+       FROM users
+       WHERE shop_balance > 0
+       ORDER BY shop_balance DESC
+       LIMIT 200`
+    )
+    res.json({
+      ok: true,
+      users: rows.map((r) => ({
+        id: Number(r.id),
+        name: String(r.name ?? ''),
+        phone: String(r.phone ?? ''),
+        shopBalance: Number(r.shopBalance ?? 0),
+      })),
+    })
+  } catch (err) {
+    console.error('[admin-shop-balance-users]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao listar usuários.' })
+  }
+})
+
+// POST /api/shop/purchase — usuário consome saldo da loja para comprar gift card
+app.post('/api/shop/purchase', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const { userId, amount, productName, referenceId } = req.body as {
+    userId?: number
+    amount?: number
+    productName?: string
+    referenceId?: string
+  }
+
+  const parsedUserId = Number(userId)
+  const parsedAmount = Number(String(amount ?? '0').replace(',', '.'))
+
+  if (!parsedUserId || Number.isNaN(parsedUserId)) {
+    res.status(400).json({ ok: false, error: 'userId inválido.' })
+    return
+  }
+  if (!parsedAmount || parsedAmount <= 0 || Number.isNaN(parsedAmount)) {
+    res.status(400).json({ ok: false, error: 'Valor inválido.' })
+    return
+  }
+  if (!productName || !String(productName).trim()) {
+    res.status(400).json({ ok: false, error: 'Nome do produto obrigatório.' })
+    return
+  }
+
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [userRows] = await conn.query<RowDataPacket[]>(
+      'SELECT id, shop_balance AS shopBalance FROM users WHERE id = ? LIMIT 1 FOR UPDATE',
+      [parsedUserId]
+    )
+    if (userRows.length === 0) {
+      await conn.rollback()
+      res.status(404).json({ ok: false, error: 'Usuário não encontrado.' })
+      return
+    }
+
+    const oldBalance = Number(userRows[0].shopBalance ?? 0)
+    if (parsedAmount > oldBalance) {
+      await conn.rollback()
+      res.status(400).json({
+        ok: false,
+        error: `Saldo insuficiente na loja. Saldo atual: R$ ${oldBalance.toFixed(2)}`,
+      })
+      return
+    }
+
+    const newBalance = oldBalance - parsedAmount
+
+    await conn.query(
+      'UPDATE users SET shop_balance = ? WHERE id = ?',
+      [newBalance, parsedUserId]
+    )
+
+    await conn.query(
+      `INSERT INTO shop_balance_transactions
+       (user_id, type, amount, reason, reference_id, old_balance, new_balance, created_by)
+       VALUES (?, 'debit', ?, ?, ?, ?, ?, NULL)`,
+      [
+        parsedUserId,
+        parsedAmount,
+        `Compra: ${String(productName).trim()}`,
+        referenceId ? String(referenceId).trim() : null,
+        oldBalance,
+        newBalance,
+      ]
+    )
+
+    await conn.commit()
+    res.json({
+      ok: true,
+      message: 'Compra realizada com sucesso.',
+      shopBalance: newBalance,
+      spent: parsedAmount,
+    })
+  } catch (err) {
+    await conn.rollback()
+    console.error('[shop-purchase]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao processar compra.' })
+  } finally {
+    conn.release()
+  }
 })
 
 // ─── 404 — rota não encontrada ───────────────────────────────────────────────
