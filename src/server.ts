@@ -13978,6 +13978,180 @@ app.patch('/api/admin/shop/giftcards/:id/usado', requireMaxAdmin, async (req: Au
   res.json({ ok: true })
 })
 
+// ─── PRODUTOS DA LOJA (catálogo) ─────────────────────────────────────────────
+
+async function ensureShopProductsTable(): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS shop_products (
+      id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      name        VARCHAR(200)   NOT NULL,
+      platform    VARCHAR(100)   NOT NULL DEFAULT '',
+      description TEXT           NULL,
+      price       DECIMAL(12,2)  NOT NULL DEFAULT 0,
+      image_url   VARCHAR(500)   NULL,
+      category    VARCHAR(100)   NOT NULL DEFAULT 'outros',
+      is_active   TINYINT(1)     NOT NULL DEFAULT 1,
+      sort_order  INT            NOT NULL DEFAULT 0,
+      created_at  DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at  DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_active (is_active),
+      INDEX idx_sort   (sort_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `)
+}
+ensureShopProductsTable().catch(err => console.error('[shop_products table]', err))
+
+// GET /api/shop/products — lista pública (ativos)
+app.get('/api/shop/products', async (_req, res) => {
+  try {
+    await ensureShopProductsTable()
+    const [rows] = await pool.query<RowDataPacket[]>(`
+      SELECT id, name, platform, description, price,
+             image_url AS imageUrl, category, sort_order AS sortOrder
+      FROM shop_products
+      WHERE is_active = 1
+      ORDER BY sort_order ASC, id ASC
+    `)
+    res.json({ ok: true, products: rows })
+  } catch (err) {
+    console.error('[shop-products-get]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar produtos.' })
+  }
+})
+
+// GET /api/admin/shop/products — lista admin (todos)
+app.get('/api/admin/shop/products', requireMaxAdmin, async (_req, res) => {
+  try {
+    await ensureShopProductsTable()
+    const [rows] = await pool.query<RowDataPacket[]>(`
+      SELECT id, name, platform, description, price,
+             image_url AS imageUrl, category, is_active AS isActive,
+             sort_order AS sortOrder, created_at AS createdAt
+      FROM shop_products
+      ORDER BY sort_order ASC, id ASC
+    `)
+    res.json({ ok: true, products: rows })
+  } catch (err) {
+    console.error('[admin-shop-products-get]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar produtos.' })
+  }
+})
+
+// POST /api/admin/shop/products — criar produto
+app.post('/api/admin/shop/products', requireMaxAdmin, async (req, res) => {
+  const { name, platform, description, price, imageUrl, category, isActive, sortOrder } = req.body as {
+    name?: string; platform?: string; description?: string
+    price?: number | string; imageUrl?: string; category?: string
+    isActive?: boolean | number; sortOrder?: number | string
+  }
+
+  const parsedName = String(name ?? '').trim()
+  if (!parsedName) {
+    res.status(400).json({ ok: false, error: 'Nome é obrigatório.' })
+    return
+  }
+  const parsedPrice = Math.max(0, Number(String(price ?? '0').replace(',', '.')))
+  if (!Number.isFinite(parsedPrice)) {
+    res.status(400).json({ ok: false, error: 'Preço inválido.' })
+    return
+  }
+
+  try {
+    await ensureShopProductsTable()
+    const [result] = await pool.query<ResultSetHeader>(
+      `INSERT INTO shop_products (name, platform, description, price, image_url, category, is_active, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        parsedName,
+        String(platform ?? '').trim(),
+        String(description ?? '').trim() || null,
+        parsedPrice,
+        String(imageUrl ?? '').trim() || null,
+        String(category ?? 'outros').trim(),
+        isActive === false || Number(isActive) === 0 ? 0 : 1,
+        Number(sortOrder ?? 0),
+      ]
+    )
+    res.status(201).json({ ok: true, id: result.insertId })
+  } catch (err) {
+    console.error('[admin-shop-products-post]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao criar produto.' })
+  }
+})
+
+// PUT /api/admin/shop/products/:id — editar produto
+app.put('/api/admin/shop/products/:id', requireMaxAdmin, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!id || id <= 0) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+
+  const { name, platform, description, price, imageUrl, category, isActive, sortOrder } = req.body as {
+    name?: string; platform?: string; description?: string
+    price?: number | string; imageUrl?: string; category?: string
+    isActive?: boolean | number; sortOrder?: number | string
+  }
+
+  const parsedName = String(name ?? '').trim()
+  if (!parsedName) {
+    res.status(400).json({ ok: false, error: 'Nome é obrigatório.' })
+    return
+  }
+  const parsedPrice = Math.max(0, Number(String(price ?? '0').replace(',', '.')))
+
+  try {
+    await ensureShopProductsTable()
+    const [result] = await pool.query<ResultSetHeader>(
+      `UPDATE shop_products
+       SET name=?, platform=?, description=?, price=?, image_url=?, category=?, is_active=?, sort_order=?
+       WHERE id=?`,
+      [
+        parsedName,
+        String(platform ?? '').trim(),
+        String(description ?? '').trim() || null,
+        parsedPrice,
+        String(imageUrl ?? '').trim() || null,
+        String(category ?? 'outros').trim(),
+        isActive === false || Number(isActive) === 0 ? 0 : 1,
+        Number(sortOrder ?? 0),
+        id,
+      ]
+    )
+    if (result.affectedRows === 0) {
+      res.status(404).json({ ok: false, error: 'Produto não encontrado.' })
+      return
+    }
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('[admin-shop-products-put]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao atualizar produto.' })
+  }
+})
+
+// DELETE /api/admin/shop/products/:id — remover produto
+app.delete('/api/admin/shop/products/:id', requireMaxAdmin, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!id || id <= 0) {
+    res.status(400).json({ ok: false, error: 'ID inválido.' })
+    return
+  }
+  try {
+    await ensureShopProductsTable()
+    const [result] = await pool.query<ResultSetHeader>(
+      'DELETE FROM shop_products WHERE id = ?', [id]
+    )
+    if (result.affectedRows === 0) {
+      res.status(404).json({ ok: false, error: 'Produto não encontrado.' })
+      return
+    }
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('[admin-shop-products-delete]', err)
+    res.status(500).json({ ok: false, error: 'Erro ao remover produto.' })
+  }
+})
+
 // ─── 404 — rota não encontrada ───────────────────────────────────────────────
 app.use((req, res) => {
   console.warn(`[404] ${req.method} ${req.originalUrl} — rota não encontrada`)
