@@ -14071,12 +14071,20 @@ ensureShopProductsTable().catch(err => console.error('[shop_products table]', er
 app.get('/api/shop/products', async (_req, res) => {
   try {
     await ensureShopProductsTable()
+    await ensureShopProductCodesTable()
     const [rows] = await pool.query<RowDataPacket[]>(`
-      SELECT id, name, platform, description, price,
-             image_url AS imageUrl, category, sort_order AS sortOrder
-      FROM shop_products
-      WHERE is_active = 1
-      ORDER BY sort_order ASC, id ASC
+      SELECT p.id, p.name, p.platform, p.description, p.price,
+             p.image_url AS imageUrl, p.category, p.sort_order AS sortOrder,
+             COALESCE(s.available, 0) AS stockCount
+      FROM shop_products p
+      LEFT JOIN (
+        SELECT product_id, COUNT(*) AS available
+        FROM shop_product_codes
+        WHERE status = 'available'
+        GROUP BY product_id
+      ) s ON s.product_id = p.id
+      WHERE p.is_active = 1
+      ORDER BY p.sort_order ASC, p.id ASC
     `)
     res.json({ ok: true, products: rows })
   } catch (err) {
