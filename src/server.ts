@@ -3134,6 +3134,38 @@ app.post('/api/shop/deposit/webhook', express.raw({ type: '*/*' }), async (req: 
   }
 })
 
+/* GET /api/shop/deposit/history — histórico de depósitos da loja do usuário autenticado */
+app.get('/api/shop/deposit/history', requireAuth, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  const userId = req.authUser!.id
+  const limit  = Math.min(Number(req.query.limit ?? 30), 100)
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, amount, status, provider_transaction_id AS externalId,
+              pix_code AS pixCode, paid_at AS paidAt, created_at AS createdAt
+       FROM shop_deposits
+       WHERE user_id = ?
+       ORDER BY id DESC
+       LIMIT ?`,
+      [userId, limit]
+    )
+    res.json({
+      ok: true,
+      deposits: (rows as RowDataPacket[]).map(r => ({
+        id:         Number(r.id),
+        amount:     Number(r.amount ?? 0),
+        status:     String(r.status ?? 'pending'),
+        externalId: r.externalId ? String(r.externalId) : null,
+        pixCode:    r.pixCode    ? String(r.pixCode)    : null,
+        paidAt:     r.paidAt     ? String(r.paidAt)     : null,
+        createdAt:  r.createdAt  ? String(r.createdAt)  : null,
+      })),
+    })
+  } catch (err) {
+    console.error('[shop-deposit-history]', err)
+    res.status(500).json({ error: 'Erro ao buscar histórico.' })
+  }
+})
+
 // ─── Start ───────────────────────────────────────────────────────────────────
 app.get('/api/monthly-salary-plans', async (_req, res) => {
   try {
