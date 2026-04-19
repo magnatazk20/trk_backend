@@ -3882,7 +3882,9 @@ app.get('/api/dashboard/cycle-products', async (_req, res) => {
         plan_type AS planType,
         stock_quantity AS stockQuantity,
         expires_at AS expiresAt,
-        require_commission_level3_count AS requireCommissionLevel3Count
+        COALESCE(require_commission_level1_count, require_commission_level_1_count, 0) AS requireCommissionLevel1Count,
+        COALESCE(require_commission_level2_count, require_commission_level_2_count, 0) AS requireCommissionLevel2Count,
+        COALESCE(require_commission_level3_count, require_commission_level_3_count, 0) AS requireCommissionLevel3Count
       FROM cycle_products
       WHERE is_active = 1
       ORDER BY sort_order ASC, id ASC
@@ -3909,6 +3911,8 @@ app.get('/api/dashboard/cycle-products', async (_req, res) => {
         planType,
         stockQuantity: Number(row.stockQuantity ?? 0),
         expiresAt: row.expiresAt ?? null,
+        requireCommissionLevel1Count: Number(row.requireCommissionLevel1Count ?? 0),
+        requireCommissionLevel2Count: Number(row.requireCommissionLevel2Count ?? 0),
         requireCommissionLevel3Count: Number(row.requireCommissionLevel3Count ?? 0),
       }
     })
@@ -3939,9 +3943,9 @@ app.get('/api/admin/cycle-products', requireMaxAdmin, async (_req, res) => {
         plan_type AS planType,
         stock_quantity AS stockQuantity,
         expires_at AS expiresAt,
-        require_commission_level1_count AS requireCommissionLevel1Count,
-        require_commission_level2_count AS requireCommissionLevel2Count,
-        require_commission_level3_count AS requireCommissionLevel3Count,
+        COALESCE(require_commission_level1_count, require_commission_level_1_count, 0) AS requireCommissionLevel1Count,
+        COALESCE(require_commission_level2_count, require_commission_level_2_count, 0) AS requireCommissionLevel2Count,
+        COALESCE(require_commission_level3_count, require_commission_level_3_count, 0) AS requireCommissionLevel3Count,
         created_at AS createdAt
       FROM cycle_products
       ORDER BY sort_order ASC, id ASC
@@ -8311,6 +8315,25 @@ const ensureCycleProductsTable = async () => {
   await tryAlter(`
     ALTER TABLE cycle_products
     ADD COLUMN require_commission_level2_count INT NOT NULL DEFAULT 0
+  `)
+
+  // migra dados das colunas antigas (com underscore entre level e o número) para as novas
+  await tryAlter(`
+    UPDATE cycle_products
+    SET require_commission_level1_count = COALESCE(require_commission_level_1_count, 0)
+    WHERE require_commission_level1_count = 0 AND COALESCE(require_commission_level_1_count, 0) > 0
+  `)
+
+  await tryAlter(`
+    UPDATE cycle_products
+    SET require_commission_level2_count = COALESCE(require_commission_level_2_count, 0)
+    WHERE require_commission_level2_count = 0 AND COALESCE(require_commission_level_2_count, 0) > 0
+  `)
+
+  await tryAlter(`
+    UPDATE cycle_products
+    SET require_commission_level3_count = COALESCE(require_commission_level_3_count, 0)
+    WHERE require_commission_level3_count = 0 AND COALESCE(require_commission_level_3_count, 0) > 0
   `)
 
   await tryAlter(`
