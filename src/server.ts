@@ -13367,6 +13367,72 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
       withdrawalHistory = []
     }
 
+    // ── Histórico de depósitos da loja (shop_deposits) ────────────────────────
+    let shopDepositHistory: Array<{
+      id: number
+      amount: number
+      status: string
+      externalId: string | null
+      paidAt: string | null
+      createdAt: string | null
+    }> = []
+
+    try {
+      const [shopDepRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, amount, status,
+                provider_transaction_id AS externalId,
+                paid_at    AS paidAt,
+                created_at AS createdAt
+         FROM shop_deposits
+         WHERE user_id = ?
+         ORDER BY id DESC
+         LIMIT 200`,
+        [userId]
+      )
+      shopDepositHistory = shopDepRows.map((row) => ({
+        id:         Number(row.id),
+        amount:     Number(row.amount ?? 0),
+        status:     String(row.status ?? 'pending'),
+        externalId: row.externalId ? String(row.externalId) : null,
+        paidAt:     row.paidAt     ? String(row.paidAt)     : null,
+        createdAt:  row.createdAt  ? String(row.createdAt)  : null,
+      }))
+    } catch {
+      shopDepositHistory = []
+    }
+
+    // ── Histórico de compras de gift card na loja (shop_balance_transactions debit) ──
+    let shopPurchaseHistory: Array<{
+      id: number
+      amount: number
+      reason: string
+      referenceId: string | null
+      createdAt: string | null
+    }> = []
+
+    try {
+      const [shopPurchRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, amount, reason,
+                reference_id AS referenceId,
+                created_at   AS createdAt
+         FROM shop_balance_transactions
+         WHERE user_id = ?
+           AND type = 'debit'
+         ORDER BY id DESC
+         LIMIT 200`,
+        [userId]
+      )
+      shopPurchaseHistory = shopPurchRows.map((row) => ({
+        id:          Number(row.id),
+        amount:      Number(row.amount ?? 0),
+        reason:      String(row.reason ?? 'Compra gift card'),
+        referenceId: row.referenceId ? String(row.referenceId) : null,
+        createdAt:   row.createdAt   ? String(row.createdAt)   : null,
+      }))
+    } catch {
+      shopPurchaseHistory = []
+    }
+
     // ── Giros da roleta realizados ──────────────────────────────────────────────
     let rouletteSpins: Array<{
       id: number
@@ -13554,6 +13620,8 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         dailyCheckinRedemptions,
         depositHistory,
         withdrawalHistory,
+        shopDepositHistory,
+        shopPurchaseHistory,
         commissionLevelStats,
         rouletteSpins,
         rouletteSpinBalance,
