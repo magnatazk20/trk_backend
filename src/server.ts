@@ -11975,14 +11975,16 @@ app.get('/api/admin/withdrawals/pending', requireMaxAdmin, async (_req, res) => 
         w.created_at AS createdAt,
         w.updated_at AS updatedAt,
         w.paid_at AS paidAt,
-        w.holder_cpf AS holderCpf,
-        w.pix_key_type AS pixKeyType,
-        w.pix_key AS pixKey,
-        u.id AS userId,
+        COALESCE(w.holder_cpf,    pk.holder_cpf,    '')  AS holderCpf,
+        COALESCE(w.pix_key_type,  pk.pix_key_type,  '')  AS pixKeyType,
+        COALESCE(w.pix_key,       pk.pix_key,       '')  AS pixKey,
+        COALESCE(w.holder_name,   pk.holder_name,   '')  AS holderName,
+        u.id   AS userId,
         u.name AS userName,
         u.phone AS userPhone
       FROM withdrawals w
       INNER JOIN users u ON u.id = w.user_id
+      LEFT JOIN user_pix_keys pk ON pk.user_id = w.user_id
       WHERE LOWER(w.status) IN ('pending', 'processing')
       ORDER BY w.id DESC
       `
@@ -12006,6 +12008,7 @@ app.get('/api/admin/withdrawals/pending', requireMaxAdmin, async (_req, res) => 
         holderCpf: String(row.holderCpf ?? ''),
         pixKeyType: String(row.pixKeyType ?? ''),
         pixKey: String(row.pixKey ?? ''),
+        holderName: String(row.holderName ?? ''),
         user: {
           id: Number(row.userId),
           name: String(row.userName ?? 'Usuário'),
