@@ -13867,6 +13867,43 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
     }
 
     const user = userRows[0]
+    // Buscar dados da conexão Telegram
+    let telegramConnection: {
+      telegramChatId: string
+      telegramUserId: string
+      telegramUsername: string
+      telegramFirstName: string
+      connectedAt: string | null
+    } | null = null
+
+    try {
+      const [tcRows] = await pool.query<RowDataPacket[]>(
+        `
+        SELECT
+          telegram_chat_id   AS telegramChatId,
+          telegram_user_id   AS telegramUserId,
+          telegram_username  AS telegramUsername,
+          telegram_first_name AS telegramFirstName,
+          created_at         AS connectedAt
+        FROM user_telegram_connections
+        WHERE user_id = ?
+        LIMIT 1
+        `,
+        [userId]
+      )
+      if (tcRows.length > 0) {
+        telegramConnection = {
+          telegramChatId:   String(tcRows[0].telegramChatId ?? ''),
+          telegramUserId:   String(tcRows[0].telegramUserId ?? ''),
+          telegramUsername: String(tcRows[0].telegramUsername ?? ''),
+          telegramFirstName: String(tcRows[0].telegramFirstName ?? ''),
+          connectedAt: tcRows[0].connectedAt ?? null,
+        }
+      }
+    } catch {
+      // tabela pode não existir ainda — ignora
+    }
+
     res.json({
       ok: true,
       user: {
@@ -13879,6 +13916,7 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         balance: Number(user.balance ?? 0),
         shopBalance: Number(user.shopBalance ?? 0),
         telegramConectado: Number(user.telegramConectado ?? 0),
+        telegramConnection,
         activeContract: user.activeContract == null ? null : String(user.activeContract),
         totalDepositsPaid: Number(depositRows[0]?.total ?? 0),
         totalWithdrawals,
