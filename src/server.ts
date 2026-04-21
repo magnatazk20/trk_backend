@@ -1383,13 +1383,16 @@ const requireAuth = async (req: AuthenticatedRequest, res: Response, next: NextF
   const authUser = await resolveAuthUser(req)
   if (!authUser) {
     const hasToken = String(req.headers.authorization ?? '').startsWith('Bearer ')
-    void logSecurityEvent({
-      eventType: hasToken ? 'invalid_token' : 'missing_token',
-      req,
-      userId: null,
-      httpStatus: 401,
-      reason: hasToken ? 'Token JWT inválido ou expirado' : 'Requisição sem token JWT',
-    })
+    const isWriteMethod = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(req.method ?? '').toUpperCase())
+    if (isWriteMethod) {
+      void logSecurityEvent({
+        eventType: hasToken ? 'invalid_token' : 'missing_token',
+        req,
+        userId: null,
+        httpStatus: 401,
+        reason: hasToken ? 'Token JWT inválido ou expirado' : 'Requisição sem token JWT em endpoint de escrita',
+      })
+    }
     res.status(401).json({ ok: false, error: 'Não autorizado.' })
     return
   }
