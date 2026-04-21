@@ -2188,7 +2188,7 @@ app.delete('/api/admin/roulette-codes/:id', requireMaxAdmin, async (req: Authent
 })
 
 // ─── Resgatar código de roleta (usuário) ─────────────────────────────────────
-app.post('/api/roleta/redeem-code', redeemCodeLimiter, async (req, res) => {
+app.post('/api/roleta/redeem-code', redeemCodeLimiter, requireAuth, async (req: AuthenticatedRequest, res) => {
   const { userId, code } = req.body as { userId?: number; code?: string }
   const parsedUserId = Number(userId)
   const normalizedCode = String(code ?? '').trim().toUpperCase()
@@ -2197,6 +2197,13 @@ app.post('/api/roleta/redeem-code', redeemCodeLimiter, async (req, res) => {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
     return
   }
+
+  // ── Segurança: userId do body deve ser o mesmo do token ──
+  if (parsedUserId !== Number(req.authUser?.id ?? 0)) {
+    res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' })
+    return
+  }
+
   if (!normalizedCode) {
     res.status(400).json({ ok: false, error: 'Código inválido.' })
     return
@@ -5061,7 +5068,7 @@ app.get('/api/mining/tasks/:userId', async (req, res) => {
   }
 })
 
-app.post('/api/mining/tasks/complete', async (req, res) => {
+app.post('/api/mining/tasks/complete', requireAuth, async (req: AuthenticatedRequest, res) => {
   const { userId, taskId } = req.body as { userId?: number; taskId?: number }
 
   const parsedUserId = Number(userId)
@@ -5069,6 +5076,12 @@ app.post('/api/mining/tasks/complete', async (req, res) => {
 
   if (!parsedUserId || Number.isNaN(parsedUserId)) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  // ── Segurança: userId do body deve ser o mesmo do token ──
+  if (parsedUserId !== Number(req.authUser?.id ?? 0)) {
+    res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' })
     return
   }
 
@@ -5958,12 +5971,18 @@ app.get('/api/roleta/segments', async (_req, res) => {
   }
 })
 
-app.post('/api/roleta/spin', spinLimiter, async (req, res) => {
+app.post('/api/roleta/spin', spinLimiter, requireAuth, async (req: AuthenticatedRequest, res) => {
   const { userId } = req.body as { userId?: number }
   const parsedUserId = Number(userId)
 
   if (!parsedUserId || Number.isNaN(parsedUserId)) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  // ── Segurança: userId do body deve ser o mesmo do token ──
+  if (parsedUserId !== Number(req.authUser?.id ?? 0)) {
+    res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' })
     return
   }
 
@@ -6703,12 +6722,18 @@ app.get('/api/checkin/status/:userId', async (req, res) => {
   }
 })
 
-app.post('/api/checkin/claim', async (req, res) => {
+app.post('/api/checkin/claim', requireAuth, async (req: AuthenticatedRequest, res) => {
   const { userId } = req.body as { userId?: number }
   const parsedUserId = Number(userId)
 
   if (!parsedUserId || Number.isNaN(parsedUserId)) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  // ── Segurança: userId do body deve ser o mesmo do token ──
+  if (parsedUserId !== Number(req.authUser?.id ?? 0)) {
+    res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' })
     return
   }
 
@@ -7521,7 +7546,7 @@ app.get('/api/withdraw/activation-status/:userId', requireAuth, async (req: Auth
   }
 })
 
-app.post('/api/withdraw/request', async (req, res) => {
+app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest, res) => {
   // ── Segurança: rejeita body não-objeto ou ausente ──
   if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
     res.status(400).json({ ok: false, error: 'Requisição inválida.' })
@@ -7538,6 +7563,12 @@ app.post('/api/withdraw/request', async (req, res) => {
   const parsedUserId = Number(userId)
   if (!Number.isInteger(parsedUserId) || parsedUserId <= 0 || parsedUserId > 2_147_483_647) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  // ── Segurança: userId do body deve ser o mesmo do token ──
+  if (parsedUserId !== Number(req.authUser?.id ?? 0)) {
+    res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' })
     return
   }
 
@@ -9815,7 +9846,7 @@ app.delete('/api/admin/gift-codes/:id', requireMaxAdmin, async (req, res) => {
   }
 })
 
-app.post('/api/gift-codes/redeem', async (req, res) => {
+app.post('/api/gift-codes/redeem', requireAuth, async (req: AuthenticatedRequest, res) => {
   const { userId, code } = req.body as { userId?: number; code?: string }
 
   const parsedUserId = Number(userId)
@@ -9823,6 +9854,12 @@ app.post('/api/gift-codes/redeem', async (req, res) => {
 
   if (!parsedUserId || Number.isNaN(parsedUserId)) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  // ── Segurança: userId do body deve ser o mesmo do token ──
+  if (parsedUserId !== Number(req.authUser?.id ?? 0)) {
+    res.status(403).json({ ok: false, error: 'Ação não permitida para este usuário.' })
     return
   }
 
