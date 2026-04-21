@@ -6453,7 +6453,7 @@ app.get('/api/community-links', async (_req, res) => {
   }
 })
 
-app.post('/api/community-links', async (req, res) => {
+app.post('/api/community-links', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
   const { whatsappGroupUrl, vipGroupUrl, managerContact } = req.body as {
     whatsappGroupUrl?: string
     vipGroupUrl?: string
@@ -7185,7 +7185,7 @@ app.get('/api/user/pix-key/:userId', async (req, res) => {
   }
 })
 
-app.post('/api/user/pix-key', async (req, res) => {
+app.post('/api/user/pix-key', requireAuth, async (req: AuthenticatedRequest, res) => {
   const { userId, holderName, holderCpf, pixKeyType, pixKey } = req.body as {
     userId?: number
     holderName?: string
@@ -7197,6 +7197,12 @@ app.post('/api/user/pix-key', async (req, res) => {
   const parsedUserId = Number(userId)
   if (!parsedUserId || Number.isNaN(parsedUserId)) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  if (parsedUserId !== Number(req.authUser?.id ?? 0)) {
+    void logSecurityEvent({ eventType: 'unauthorized_action', req, userId: Number(req.authUser?.id ?? 0), attemptedUserId: parsedUserId, httpStatus: 403, reason: 'Tentativa de alterar chave PIX de outro usuário' })
+    res.status(403).json({ ok: false, error: 'Ação não permitida.' })
     return
   }
 
@@ -7446,7 +7452,7 @@ app.post('/api/user/withdraw-password', requireAuth, async (req: AuthenticatedRe
   }
 })
 
-app.post('/api/user/change-password', async (req, res) => {
+app.post('/api/user/change-password', requireAuth, async (req: AuthenticatedRequest, res) => {
   const { userId, currentPassword, newPassword } = req.body as {
     userId?: number
     currentPassword?: string
@@ -7459,6 +7465,12 @@ app.post('/api/user/change-password', async (req, res) => {
 
   if (!parsedUserId || Number.isNaN(parsedUserId)) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
+    return
+  }
+
+  if (parsedUserId !== Number(req.authUser?.id ?? 0)) {
+    void logSecurityEvent({ eventType: 'unauthorized_action', req, userId: Number(req.authUser?.id ?? 0), attemptedUserId: parsedUserId, httpStatus: 403, reason: 'Tentativa de alterar senha de outro usuário' })
+    res.status(403).json({ ok: false, error: 'Ação não permitida.' })
     return
   }
 
@@ -12529,7 +12541,7 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
   }
 })
 
-app.post('/api/admin/migrate-balance-columns', async (_req, res) => {
+app.post('/api/admin/migrate-balance-columns', requireMaxAdmin, async (_req: AuthenticatedRequest, res) => {
   try {
     const [balanceCols] = await pool.query<RowDataPacket[]>(
       "SHOW COLUMNS FROM users LIKE 'balance'"
