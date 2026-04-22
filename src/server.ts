@@ -7889,33 +7889,65 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
       return
     }
 
-    await ensureWithdrawActivationTokensTable()
-
-    const [activationRows] = await conn.query<RowDataPacket[]>(
+    await conn.query(
       `
-      SELECT id
-      FROM withdraw_activation_tokens
-      WHERE user_id = ?
-        AND status = 'activated'
-        AND activated_at IS NOT NULL
-        AND activated_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-      ORDER BY activated_at DESC, id DESC
-      LIMIT 1
-      FOR UPDATE
-      `,
-      [parsedUserId]
+      CREATE TABLE IF NOT EXISTS system_withdraw_config (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        withdraw_fee_percent DECIMAL(8,2) NOT NULL DEFAULT 0.00,
+        min_withdraw_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        max_withdraw_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        withdraw_auto_approve TINYINT(1) NOT NULL DEFAULT 0,
+        withdraw_start_time CHAR(5) NOT NULL DEFAULT '00:00',
+        withdraw_end_time CHAR(5) NOT NULL DEFAULT '23:59',
+        withdraw_allowed_days VARCHAR(32) NOT NULL DEFAULT '0,1,2,3,4,5,6',
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )
+      `
     )
 
-    if (activationRows.length === 0) {
-      await conn.rollback()
-      res.status(400).json({
-        ok: false,
-        error: 'Saque não ativado. Envie no grupo permitido: "Ative o saque para mim: TOKEN".',
-      })
-      return
-    }
+    try {
+      await conn.query(
+        `ALTER TABLE system_withdraw_config ADD COLUMN withdraw_auto_approve TINYINT(1) NOT NULL DEFAULT 0`
+      )
+    } catch { /* coluna já existe */ }
 
-    const activationTokenId = Number(activationRows[0].id ?? 0)
+    const [earlyConfigRows] = await conn.query<RowDataPacket[]>(
+      `SELECT withdraw_auto_approve AS withdrawAutoApprove FROM system_withdraw_config ORDER BY id ASC LIMIT 1`
+    )
+    const shouldAutoApproveEarly = Number(earlyConfigRows[0]?.withdrawAutoApprove ?? 0) === 1
+
+    await ensureWithdrawActivationTokensTable()
+
+    let activationTokenId = 0
+    if (!shouldAutoApproveEarly) {
+      const [activationRows] = await conn.query<RowDataPacket[]>(
+        `
+        SELECT id
+        FROM withdraw_activation_tokens
+        WHERE user_id = ?
+          AND status = 'activated'
+          AND activated_at IS NOT NULL
+          AND activated_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+        ORDER BY activated_at DESC, id DESC
+        LIMIT 1
+        FOR UPDATE
+        `,
+        [parsedUserId]
+      )
+
+      if (activationRows.length === 0) {
+        await conn.rollback()
+        res.status(400).json({
+          ok: false,
+          error: 'Saque não ativado. Envie no grupo permitido: "Ative o saque para mim: TOKEN".',
+        })
+        return
+      }
+
+      activationTokenId = Number(activationRows[0].id ?? 0)
+    }
 
     const [openWithdrawRows] = await conn.query<RowDataPacket[]>(
       `
@@ -8016,72 +8048,9 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
       `
     )
 
-    await conn.query(
-      `
-      CREATE TABLE IF NOT EXISTS system_withdraw_config (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        withdraw_fee_percent DECIMAL(8,2) NOT NULL DEFAULT 0.00,
-        min_withdraw_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-        max_withdraw_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-        withdraw_auto_approve TINYINT(1) NOT NULL DEFAULT 0,
-        withdraw_start_time CHAR(5) NOT NULL DEFAULT '00:00',
-        withdraw_end_time CHAR(5) NOT NULL DEFAULT '23:59',
-        withdraw_allowed_days VARCHAR(32) NOT NULL DEFAULT '0,1,2,3,4,5,6',
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (id)
-      )
-      `
-    )
-
-    try {
-      await conn.query(
-        `
-        ALTER TABLE system_withdraw_config
-        ADD COLUMN withdraw_auto_approve TINYINT(1) NOT NULL DEFAULT 0
-        `
-      )
-    } catch {
-      // coluna já existe
-    }
-
-    try {
-      await conn.query(
-        `
-        ALTER TABLE system_withdraw_config
-        ADD COLUMN withdraw_start_time CHAR(5) NOT NULL DEFAULT '00:00'
-        `
-      )
-    } catch {
-      // coluna já existe
-    }
-
-    try {
-      await conn.query(
-        `
-        ALTER TABLE system_withdraw_config
-        ADD COLUMN withdraw_end_time CHAR(5) NOT NULL DEFAULT '23:59'
-        `
-      )
-    } catch {
-      // coluna já existe
-    }
-
-    try {
-      await conn.query(
-        `
-        ALTER TABLE system_withdraw_config
-        ADD COLUMN withdraw_allowed_days VARCHAR(32) NOT NULL DEFAULT '0,1,2,3,4,5,6'
-        `
-      )
-    } catch {
-      // coluna já existe
-    }
-
     const [configRows] = await conn.query<RowDataPacket[]>(
       `
       SELECT
-        withdraw_auto_approve AS withdrawAutoApprove,
         withdraw_fee_percent AS withdrawFeePercent,
         min_withdraw_amount AS minWithdrawAmount,
         max_withdraw_amount AS maxWithdrawAmount,
@@ -8094,7 +8063,7 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
       `
     )
 
-    const shouldAutoApprove = Number(configRows[0]?.withdrawAutoApprove ?? 0) === 1
+    const shouldAutoApprove = shouldAutoApproveEarly
     const withdrawFeePercentRaw = Number(configRows[0]?.withdrawFeePercent ?? 0)
     const minWithdrawAmount = Number(configRows[0]?.minWithdrawAmount ?? 0)
     const maxWithdrawAmount = Number(configRows[0]?.maxWithdrawAmount ?? 0)
