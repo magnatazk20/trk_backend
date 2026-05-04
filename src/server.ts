@@ -2650,7 +2650,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       )
       if (refRows.length > 0) {
         if (Number(refRows[0].allow_referral_link ?? 1) === 0) {
-          res.status(403).json({ error: 'Este link de convite não está ativo no momento.' })
+          res.status(403).json({ error: 'This invitation link is currently inactive.' })
           return
         }
         referredByUserId = Number(refRows[0].id)
@@ -10565,6 +10565,27 @@ const applyReferralCommissionsForTask = async (
       const parentUserId = Number(uplineRows[0].referredByUserId ?? 0)
       if (!parentUserId || Number.isNaN(parentUserId)) break
 
+      // ── Pula upline se for T0-Estágio (vip_level_id = 6) — não recebe comissão ──
+      const [t0CheckRows] = await conn.query<RowDataPacket[]>(
+        `
+        SELECT uv.vip_level_id AS vipLevelId
+        FROM user_vips uv
+        INNER JOIN vip_levels vl ON vl.id = uv.vip_level_id
+        WHERE uv.user_id = ?
+          AND uv.status = 'active'
+          AND (uv.expires_at IS NULL OR uv.expires_at > NOW())
+        ORDER BY uv.id DESC
+        LIMIT 1
+        `,
+        [parentUserId]
+      )
+      const parentVipLevelId = Number(t0CheckRows[0]?.vipLevelId ?? 0)
+      if (parentVipLevelId === 6) {
+        // T0-Estágio: não recebe comissão de tarefa, mas o loop continua subindo na árvore
+        currentUserId = parentUserId
+        continue
+      }
+
       const levelConfig = activeLevels.find((item) => item.level === level)
       if (levelConfig) {
         const commissionAmount = Number((parsedRewardAmount * (levelConfig.commissionPercent / 100)).toFixed(2))
@@ -11005,6 +11026,27 @@ const applyReferralCommissionsForVipPurchase = async (
 
       const parentUserId = Number(uplineRows[0].referredByUserId ?? 0)
       if (!parentUserId || Number.isNaN(parentUserId)) break
+
+      // ── Pula upline se for T0-Estágio (vip_level_id = 6) — não recebe comissão de VIP ──
+      const [t0CheckRows] = await conn.query<RowDataPacket[]>(
+        `
+        SELECT uv.vip_level_id AS vipLevelId
+        FROM user_vips uv
+        INNER JOIN vip_levels vl ON vl.id = uv.vip_level_id
+        WHERE uv.user_id = ?
+          AND uv.status = 'active'
+          AND (uv.expires_at IS NULL OR uv.expires_at > NOW())
+        ORDER BY uv.id DESC
+        LIMIT 1
+        `,
+        [parentUserId]
+      )
+      const parentVipLevelId = Number(t0CheckRows[0]?.vipLevelId ?? 0)
+      if (parentVipLevelId === 6) {
+        // T0-Estágio: não recebe comissão de VIP, mas continua subindo na árvore
+        currentUserId = parentUserId
+        continue
+      }
 
       const levelConfig = activeLevels.find((item) => item.level === level)
       if (levelConfig) {
