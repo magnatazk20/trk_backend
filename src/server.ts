@@ -6342,6 +6342,9 @@ app.get('/api/mining/tasks/:userId', async (req, res) => {
       remainingByVip,
       tasks,
     })
+
+    // DEBUG: log a contagem que está sendo retornada
+    console.log(`[TASKS-LIST] userId=${userId} totalCompleted=${totalCompletedToday} remaining=${remainingByVip} tasksCount=${tasks.length}`)
   } catch (err) {
     console.error('[mining-tasks-list]', err)
     res.status(500).json({ ok: false, error: 'Erro interno ao listar tarefas.' })
@@ -6350,6 +6353,9 @@ app.get('/api/mining/tasks/:userId', async (req, res) => {
 
 app.post('/api/mining/tasks/complete', requireAuth, async (req: AuthenticatedRequest, res) => {
   const { userId, taskId } = req.body as { userId?: number; taskId?: number }
+
+  // DEBUG: log cada chamada para contar duplicatas
+  console.log(`[COMPLETE-TASK] userId=${userId} taskId=${taskId} ts=${Date.now()}`)
 
   const parsedUserId = Number(userId)
   const parsedTaskId = Number(taskId)
