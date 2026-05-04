@@ -14986,6 +14986,13 @@ app.get('/api/admin/users', requireMaxAdmin, async (_req, res) => {
       `
     ).catch(() => null)
 
+    await pool.query(
+      `
+      ALTER TABLE users
+      ADD COLUMN allow_referral_link TINYINT(1) NOT NULL DEFAULT 1
+      `
+    ).catch(() => null)
+
     const [rows] = await pool.query<RowDataPacket[]>(
       `
       SELECT
@@ -15141,6 +15148,19 @@ app.patch('/api/admin/users/:id/referral-link', requireMaxAdmin, async (req, res
   } catch (err) {
     console.error('[admin-users-referral-link]', err)
     res.status(500).json({ ok: false, error: 'Falha ao alterar permissão.' })
+  }
+})
+
+app.patch('/api/admin/users/referral-link-bulk', requireMaxAdmin, async (req, res) => {
+  const allow = (req.body as { allow_referral_link?: number })?.allow_referral_link ? 1 : 0
+  try {
+    await pool.query("ALTER TABLE users ADD COLUMN allow_referral_link TINYINT(1) NOT NULL DEFAULT 1").catch(() => null)
+    const [result] = await pool.query('UPDATE users SET allow_referral_link = ?', [allow])
+    const updated = Number((result as { affectedRows?: number }).affectedRows ?? 0)
+    res.json({ ok: true, message: `Atualizados ${updated} usuários.`, updated })
+  } catch (err) {
+    console.error('[admin-users-referral-link-bulk]', err)
+    res.status(500).json({ ok: false, error: 'Falha ao atualizar permissões.' })
   }
 })
 
