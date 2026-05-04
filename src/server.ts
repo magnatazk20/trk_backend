@@ -15783,6 +15783,7 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
       ADD COLUMN is_banned TINYINT(1) NOT NULL DEFAULT 0
       `
     ).catch(() => null)
+    await pool.query("ALTER TABLE users ADD COLUMN allow_referral_link TINYINT(1) NOT NULL DEFAULT 1").catch(() => null)
 
     const [userRows] = await pool.query<RowDataPacket[]>(
       `
@@ -15792,6 +15793,7 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         phone,
         is_admin,
         COALESCE(is_banned, 0) AS is_banned,
+        COALESCE(allow_referral_link, 1) AS allow_referral_link,
         created_at,
         COALESCE(balance, 0) AS balance,
         COALESCE(shop_balance, 0) AS shopBalance,
