@@ -6217,6 +6217,11 @@ app.get('/api/mining/history/:userId', async (req, res) => {
 })
 
 app.get('/api/mining/tasks/:userId', async (req, res) => {
+  // Impede cache do navegador para este endpoint (dados personalizados por usuário)
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  res.setHeader('Pragma', 'no-cache')
+  res.setHeader('Expires', '0')
+
   const userId = Number(req.params.userId)
 
   if (!userId || Number.isNaN(userId)) {
