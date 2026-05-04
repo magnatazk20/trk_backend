@@ -2657,17 +2657,20 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       }
     }
 
-    // ── Verifica se registro requer convite obrigatório ──
+    // ── Busca configurações do site para registro ──
+    let siteAllowReferral = 1  // padrão: link de convite liberado
+    let requiresInvite = false
     try {
       const [settingsRows] = await pool.query<RowDataPacket[]>(
-        `SELECT COALESCE(registration_requires_invite, 0) AS registrationRequiresInvite FROM site_settings ORDER BY id ASC LIMIT 1`
+        `SELECT COALESCE(allow_user_referral_link, 1) AS allowUserReferralLink, COALESCE(registration_requires_invite, 0) AS registrationRequiresInvite FROM site_settings ORDER BY id ASC LIMIT 1`
       )
-      const requiresInvite = Number(settingsRows[0]?.registrationRequiresInvite ?? 0) === 1
+      siteAllowReferral = Number(settingsRows[0]?.allowUserReferralLink ?? 1)
+      requiresInvite = Number(settingsRows[0]?.registrationRequiresInvite ?? 0) === 1
       if (requiresInvite && !referredByUserId) {
         res.status(403).json({ error: 'Registration is only available with an invitation link from a user.' })
         return
       }
-    } catch { /* se falhar, permite registro */ }
+    } catch { /* se falhar, permite registro normalmente */ }
 
     // Garante coluna badge antes do insert (idempotente)
     await pool
@@ -2678,8 +2681,8 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     await pool.query("ALTER TABLE users ADD COLUMN badge VARCHAR(50) NOT NULL DEFAULT 'Estagiário'").catch(() => null)
     await pool.query("ALTER TABLE users ADD COLUMN allow_referral_link TINYINT(1) NOT NULL DEFAULT 1").catch(() => null)
     const [result] = await pool.query(
-      'INSERT INTO users (name, phone, password, referral_code, referred_by_user_id, badge, allow_referral_link) VALUES (?, ?, ?, ?, ?, ?, 1)',
-      [name, normalizedPhone, hash, userReferralCode, referredByUserId, 'Estagiário']
+      'INSERT INTO users (name, phone, password, referral_code, referred_by_user_id, badge, allow_referral_link) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [name, normalizedPhone, hash, userReferralCode, referredByUserId, 'Estagiário', siteAllowReferral]
     ) as any
 
     const userId = result.insertId
