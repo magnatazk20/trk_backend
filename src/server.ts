@@ -5566,7 +5566,7 @@ app.post('/api/vip/activate', requireAuth, async (req: AuthenticatedRequest, res
         )
         VALUES (?, ?, ?, ?, ?)
         `,
-        [parsedUserId, parsedVipLevelId, levelPrice, currentBalance, currentBalance - levelPrice]
+        [parsedUserId, parsedVipLevelId, levelPrice, currentWalletBalance, currentWalletBalance - levelPrice]
       )
 
       const purchaseId = purchaseResult.insertId
@@ -5607,8 +5607,8 @@ app.post('/api/vip/activate', requireAuth, async (req: AuthenticatedRequest, res
       ok: true,
       message: `VIP ${String(levels[0].name ?? '')} ativado com sucesso.${upgradeMsg}`,
       amountPaid: levelPrice,
-      balanceBefore: currentBalance,
-      balanceAfter: currentBalance - levelPrice,
+      balanceBefore: currentWalletBalance,
+      balanceAfter: currentWalletBalance - levelPrice,
       upgraded: hasActiveVip,
     })
   } catch (err: any) {
