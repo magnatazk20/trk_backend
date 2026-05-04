@@ -2770,7 +2770,9 @@ app.get('/api/user/invite-counts/:userId', requireAuth, async (req, res) => {
 
 // ─── Login ───────────────────────────────────────────────────────────────────
 app.get('/api/user/summary/:id', async (req, res) => {
-  const userId = Number(req.params.id)
+  const rawId = req.params.id
+  const userId = Number(rawId)
+  console.log('[user-summary] REQUEST start — rawId:', rawId, '-> userId:', userId)
 
   if (!userId || Number.isNaN(userId)) {
     res.status(400).json({ error: 'ID de usuário inválido.' })
@@ -2802,6 +2804,14 @@ app.get('/api/user/summary/:id', async (req, res) => {
       .query('ALTER TABLE users ADD COLUMN commission_balance DECIMAL(12,2) NOT NULL DEFAULT 0.00')
       .catch(() => null)
 
+    // Auto-expirar VIPs vencidos antes de consultar
+    await pool.query(
+      `UPDATE user_vips
+       SET status = 'inactive'
+       WHERE user_id = ? AND status = 'active' AND expires_at IS NOT NULL AND expires_at <= NOW()`,
+      [userId]
+    )
+
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT
          balance,
@@ -2820,6 +2830,61 @@ app.get('/api/user/summary/:id', async (req, res) => {
       return
     }
 
+    // Buscar VIP ativo do usuário
+    console.log('[user-summary] checking VIP for userId:', userId)
+    const [vipRows] = await pool.query<RowDataPacket[]>(
+      `SELECT
+         uv.vip_level_id AS vipLevelId,
+         vl.name AS vipName,
+         uv.status,
+         uv.expires_at AS expiresAt
+       FROM user_vips uv
+       JOIN vip_levels vl ON vl.id = uv.vip_level_id
+       WHERE uv.user_id = ? AND uv.status = 'active' AND (uv.expires_at IS NULL OR uv.expires_at > NOW())
+       LIMIT 1`,
+      [userId]
+    )
+    console.log('[user-summary] VIP rows found:', vipRows.length, vipRows[0] ?? null)
+
+    const currentVip = vipRows.length > 0
+      ? { vipLevelId: Number(vipRows[0].vipLevelId), name: String(vipRows[0].vipName) }
+      : null
+
+    // Buscar contagens de rede (t0=t0, t1=nível 1, t2=nível 2, t3=nível 3, t4=nível 4, t5=nível 5)
+    const teamCounts: Record<string, number> = { t0: 0, t1: 0, t2: 0, t3: 0, t4: 0, t5: 0 }
+    try {
+      // t1 — nível direto (1 salto)
+      const [t1Rows] = await pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS cnt FROM users WHERE referred_by_user_id = ?`,
+        [userId]
+      )
+      teamCounts.t1 = Number(t1Rows[0]?.cnt ?? 0)
+      teamCounts.t0 = teamCounts.t1 // t0 espelha t1 na nomenclatura do projeto
+
+      // t2, t3, t4, t5 — níveis indiretos
+      for (let level = 2; level <= 5; level++) {
+        const [levelRows] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS cnt FROM (
+            WITH RECURSIVE referral_tree AS (
+              SELECT id, referred_by_user_id, 1 AS level
+              FROM users WHERE referred_by_user_id = ?
+              UNION ALL
+              SELECT u.id, u.referred_by_user_id, rt.level + 1
+              FROM users u
+              INNER JOIN referral_tree rt ON u.referred_by_user_id = rt.id
+              WHERE rt.level < ?
+            )
+            SELECT id FROM referral_tree WHERE level = ?
+          ) AS sub`,
+          [userId, level, level]
+        )
+        const key = `t${level}`
+        teamCounts[key] = Number(levelRows[0]?.cnt ?? 0)
+      }
+    } catch (err) {
+      console.error('[user-summary-team-counts]', err)
+    }
+
     const row = rows[0] as {
       balance: number | string
       shop_balance: number | string
@@ -2830,6 +2895,7 @@ app.get('/api/user/summary/:id', async (req, res) => {
       commissionBalance?: number | string
     }
 
+    console.log('[user-summary] final response currentVip:', JSON.stringify(currentVip))
     res.json({
       balance: Number(row.balance ?? 0),
       shopBalance: Number(row.shop_balance ?? 0),
@@ -2838,6 +2904,8 @@ app.get('/api/user/summary/:id', async (req, res) => {
       commissionBalance: Number(row.commissionBalance ?? 0),
       monthlySalaryContract: row.monthlySalaryContract == null ? null : String(row.monthlySalaryContract),
       badge: row.badge == null || String(row.badge).trim() === '' ? 'Estagiário' : String(row.badge),
+      currentVip,
+      teamCounts,
     })
   } catch (err) {
     console.error('[user-summary]', err)
@@ -5192,7 +5260,7 @@ app.get('/api/vip/user/:userId', async (req, res) => {
     )
 
     const [balanceRows] = await pool.query<RowDataPacket[]>(
-      'SELECT balance FROM users WHERE id = ? LIMIT 1',
+      'SELECT balance, commission_balance, recharge_balance FROM users WHERE id = ? LIMIT 1',
       [userId]
     )
 
@@ -5202,6 +5270,8 @@ app.get('/api/vip/user/:userId', async (req, res) => {
     }
 
     const userBalance = Number(balanceRows[0].balance ?? 0)
+    const userCommissionBalance = Number(balanceRows[0].commission_balance ?? 0)
+    const userRechargeBalance = Number(balanceRows[0].recharge_balance ?? 0)
 
     const [rows] = await pool.query<RowDataPacket[]>(
       `
@@ -5229,7 +5299,7 @@ app.get('/api/vip/user/:userId', async (req, res) => {
     )
 
     if (rows.length === 0) {
-      res.json({ ok: true, hasVip: false, vip: null, balance: userBalance })
+      res.json({ ok: true, hasVip: false, vip: null, balance: userBalance, commission_balance: userCommissionBalance, recharge_balance: userRechargeBalance })
       return
     }
 
@@ -5238,6 +5308,8 @@ app.get('/api/vip/user/:userId', async (req, res) => {
       ok: true,
       hasVip: true,
       balance: userBalance,
+      commission_balance: userCommissionBalance,
+      recharge_balance: userRechargeBalance,
       vip: {
         id: Number(vip.id),
         userId: Number(vip.userId),
@@ -5259,10 +5331,12 @@ app.get('/api/vip/user/:userId', async (req, res) => {
 })
 
 app.post('/api/vip/activate', requireAuth, async (req: AuthenticatedRequest, res) => {
-  const { userId, vipLevelId } = req.body as { userId?: number; vipLevelId?: number }
+  const { userId, vipLevelId, wallet } = req.body as { userId?: number; vipLevelId?: number; wallet?: string }
 
   const parsedUserId = Number(userId)
   const parsedVipLevelId = Number(vipLevelId)
+  const allowedWallets = ['balance', 'commission_balance', 'recharge_balance']
+  const walletField = allowedWallets.includes(wallet ?? '') ? wallet! : 'balance'
 
   if (!parsedUserId || Number.isNaN(parsedUserId)) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
@@ -5284,7 +5358,7 @@ app.post('/api/vip/activate', requireAuth, async (req: AuthenticatedRequest, res
     await settleExpiredCyclesForUser(parsedUserId)
 
     const [users] = await pool.query<RowDataPacket[]>(
-      'SELECT id, balance FROM users WHERE id = ? LIMIT 1',
+      'SELECT id, balance, commission_balance, recharge_balance FROM users WHERE id = ? LIMIT 1',
       [parsedUserId]
     )
 
@@ -5309,7 +5383,7 @@ app.post('/api/vip/activate', requireAuth, async (req: AuthenticatedRequest, res
 
     const levelPrice = Number(levels[0].price ?? 0)
     const levelDurationDays = Math.max(1, Math.round(Number(levels[0].durationDays ?? 365)))
-    const currentBalance = Number(users[0].balance ?? 0)
+    const currentWalletBalance = Number(users[0][walletField] ?? 0)
 
     // Bloqueia ativação de VIP gratuito (T0 - Estágio): só é concedido automaticamente no cadastro.
     if (levelPrice <= 0) {
@@ -5420,12 +5494,12 @@ app.post('/api/vip/activate', requireAuth, async (req: AuthenticatedRequest, res
       return
     }
 
-    if (currentBalance < levelPrice) {
+    if (currentWalletBalance < levelPrice) {
       res.status(400).json({
         ok: false,
-        error: 'Saldo insuficiente para ativar este VIP.',
+        error: `Saldo insuficiente na carteira selecionada para ativar este VIP. Necessário: R$ ${levelPrice.toFixed(2).replace('.', ',')}, disponível: R$ ${currentWalletBalance.toFixed(2).replace('.', ',')}`,
         required: levelPrice,
-        available: currentBalance,
+        available: currentWalletBalance,
       })
       return
     }
@@ -5443,20 +5517,14 @@ app.post('/api/vip/activate', requireAuth, async (req: AuthenticatedRequest, res
         [parsedUserId]
       )
 
-      await conn.query(
-        `
-        UPDATE users
-        SET
-          balance = COALESCE(balance, 0) - ?,
-          commission_balance = GREATEST(COALESCE(commission_balance, 0) - ?, 0),
-          recharge_balance = GREATEST(
-            COALESCE(recharge_balance, 0) - GREATEST(? - COALESCE(commission_balance, 0), 0),
-            0
-          )
-        WHERE id = ?
-        `,
-        [levelPrice, levelPrice, levelPrice, parsedUserId]
-      )
+      // Deduct only from selected wallet
+      if (walletField === 'balance') {
+        await conn.query(`UPDATE users SET balance = COALESCE(balance, 0) - ? WHERE id = ?`, [levelPrice, parsedUserId])
+      } else if (walletField === 'commission_balance') {
+        await conn.query(`UPDATE users SET commission_balance = COALESCE(commission_balance, 0) - ? WHERE id = ?`, [levelPrice, parsedUserId])
+      } else if (walletField === 'recharge_balance') {
+        await conn.query(`UPDATE users SET recharge_balance = COALESCE(recharge_balance, 0) - ? WHERE id = ?`, [levelPrice, parsedUserId])
+      }
 
       await conn.query(
         `
