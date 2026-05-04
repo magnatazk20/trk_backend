@@ -2635,6 +2635,18 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       }
     }
 
+    // ── Verifica se registro requer convite obrigatório ──
+    try {
+      const [settingsRows] = await pool.query<RowDataPacket[]>(
+        `SELECT COALESCE(registration_requires_invite, 0) AS registrationRequiresInvite FROM site_settings ORDER BY id ASC LIMIT 1`
+      )
+      const requiresInvite = Number(settingsRows[0]?.registrationRequiresInvite ?? 0) === 1
+      if (requiresInvite && !referredByUserId) {
+        res.status(403).json({ error: 'Cadastro disponível apenas com link de convite de um usuário.' })
+        return
+      }
+    } catch { /* se falhar, permite registro */ }
+
     // Garante coluna badge antes do insert (idempotente)
     await pool
       .query("ALTER TABLE users ADD COLUMN badge VARCHAR(50) NOT NULL DEFAULT 'Estagiário'")
@@ -13208,6 +13220,12 @@ app.get('/api/site-settings', async (_req, res) => {
     try {
       await pool.query(`ALTER TABLE site_settings ADD COLUMN telegram_group_link VARCHAR(500) NULL`)
     } catch { /* coluna já existe */ }
+    try {
+      await pool.query(`ALTER TABLE site_settings ADD COLUMN allow_user_referral_link TINYINT(1) NOT NULL DEFAULT 1`)
+    } catch { /* coluna já existe */ }
+    try {
+      await pool.query(`ALTER TABLE site_settings ADD COLUMN registration_requires_invite TINYINT(1) NOT NULL DEFAULT 0`)
+    } catch { /* coluna já existe */ }
 
     const [rows] = await pool.query<RowDataPacket[]>(
       `
@@ -13216,6 +13234,8 @@ app.get('/api/site-settings', async (_req, res) => {
         site_description AS siteDescription,
         COALESCE(site_logo_url, '') AS siteLogoUrl,
         COALESCE(telegram_group_link, '') AS telegramGroupLink,
+        COALESCE(allow_user_referral_link, 1) AS allowUserReferralLink,
+        COALESCE(registration_requires_invite, 0) AS registrationRequiresInvite,
         updated_at AS updatedAt
       FROM site_settings
       ORDER BY id ASC
@@ -13231,6 +13251,8 @@ app.get('/api/site-settings', async (_req, res) => {
           siteDescription: '',
           siteLogoUrl: '',
           telegramGroupLink: '',
+          allowUserReferralLink: true,
+          registrationRequiresInvite: false,
           updatedAt: null,
         },
       })
@@ -13244,6 +13266,8 @@ app.get('/api/site-settings', async (_req, res) => {
         siteDescription: String(rows[0].siteDescription ?? ''),
         siteLogoUrl: String(rows[0].siteLogoUrl ?? ''),
         telegramGroupLink: String(rows[0].telegramGroupLink ?? ''),
+        allowUserReferralLink: Boolean(rows[0].allowUserReferralLink ?? 1),
+        registrationRequiresInvite: Boolean(rows[0].registrationRequiresInvite ?? 0),
         updatedAt: rows[0].updatedAt ?? null,
       },
     })
@@ -13578,6 +13602,8 @@ app.get('/api/admin/site-settings', requireMaxAdmin, async (_req, res) => {
 
     try { await pool.query(`ALTER TABLE site_settings ADD COLUMN site_logo_url VARCHAR(500) NULL`) } catch { /* já existe */ }
     try { await pool.query(`ALTER TABLE site_settings ADD COLUMN telegram_group_link VARCHAR(500) NULL`) } catch { /* já existe */ }
+    try { await pool.query(`ALTER TABLE site_settings ADD COLUMN allow_user_referral_link TINYINT(1) NOT NULL DEFAULT 1`) } catch { /* já existe */ }
+    try { await pool.query(`ALTER TABLE site_settings ADD COLUMN registration_requires_invite TINYINT(1) NOT NULL DEFAULT 0`) } catch { /* já existe */ }
 
     const [rows] = await pool.query<RowDataPacket[]>(
       `
@@ -13587,6 +13613,8 @@ app.get('/api/admin/site-settings', requireMaxAdmin, async (_req, res) => {
         site_description AS siteDescription,
         COALESCE(site_logo_url, '') AS siteLogoUrl,
         COALESCE(telegram_group_link, '') AS telegramGroupLink,
+        COALESCE(allow_user_referral_link, 1) AS allowUserReferralLink,
+        COALESCE(registration_requires_invite, 0) AS registrationRequiresInvite,
         updated_at AS updatedAt
       FROM site_settings
       ORDER BY id ASC
@@ -13596,7 +13624,7 @@ app.get('/api/admin/site-settings', requireMaxAdmin, async (_req, res) => {
 
     if (rows.length === 0) {
       await pool.query(`INSERT INTO site_settings (site_title, site_description, site_logo_url) VALUES ('', '', '')`)
-      res.json({ ok: true, settings: { siteTitle: '', siteDescription: '', siteLogoUrl: '', telegramGroupLink: '', updatedAt: null } })
+      res.json({ ok: true, settings: { siteTitle: '', siteDescription: '', siteLogoUrl: '', telegramGroupLink: '', allowUserReferralLink: true, registrationRequiresInvite: false, updatedAt: null } })
       return
     }
 
@@ -13607,6 +13635,8 @@ app.get('/api/admin/site-settings', requireMaxAdmin, async (_req, res) => {
         siteDescription: String(rows[0].siteDescription ?? ''),
         siteLogoUrl: String(rows[0].siteLogoUrl ?? ''),
         telegramGroupLink: String(rows[0].telegramGroupLink ?? ''),
+        allowUserReferralLink: Boolean(rows[0].allowUserReferralLink ?? 1),
+        registrationRequiresInvite: Boolean(rows[0].registrationRequiresInvite ?? 0),
         updatedAt: rows[0].updatedAt ?? null,
       },
     })
@@ -13617,17 +13647,21 @@ app.get('/api/admin/site-settings', requireMaxAdmin, async (_req, res) => {
 })
 
 app.post('/api/admin/site-settings', requireMaxAdmin, async (req, res) => {
-  const { siteTitle, siteDescription, siteLogoUrl, telegramGroupLink } = req.body as {
+  const { siteTitle, siteDescription, siteLogoUrl, telegramGroupLink, allowUserReferralLink, registrationRequiresInvite } = req.body as {
     siteTitle?: string
     siteDescription?: string
     siteLogoUrl?: string
     telegramGroupLink?: string
+    allowUserReferralLink?: boolean
+    registrationRequiresInvite?: boolean
   }
 
   const parsedSiteTitle = String(siteTitle ?? '').trim()
   const parsedSiteDescription = String(siteDescription ?? '').trim()
   const parsedSiteLogoUrl = String(siteLogoUrl ?? '').trim()
   const parsedTelegramGroupLink = String(telegramGroupLink ?? '').trim()
+  const parsedAllowUserReferralLink = allowUserReferralLink !== false ? 1 : 0
+  const parsedRegistrationRequiresInvite = registrationRequiresInvite === true ? 1 : 0
 
   if (!parsedSiteTitle) {
     res.status(400).json({ ok: false, error: 'Título do site é obrigatório.' })
@@ -13638,25 +13672,27 @@ app.post('/api/admin/site-settings', requireMaxAdmin, async (req, res) => {
     await pool.query(`CREATE TABLE IF NOT EXISTS site_settings (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, site_title VARCHAR(150) NOT NULL DEFAULT '', site_description TEXT NULL, site_logo_url VARCHAR(500) NULL, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (id))`)
     try { await pool.query(`ALTER TABLE site_settings ADD COLUMN site_logo_url VARCHAR(500) NULL`) } catch { /* já existe */ }
     try { await pool.query(`ALTER TABLE site_settings ADD COLUMN telegram_group_link VARCHAR(500) NULL`) } catch { /* já existe */ }
+    try { await pool.query(`ALTER TABLE site_settings ADD COLUMN allow_user_referral_link TINYINT(1) NOT NULL DEFAULT 1`) } catch { /* já existe */ }
+    try { await pool.query(`ALTER TABLE site_settings ADD COLUMN registration_requires_invite TINYINT(1) NOT NULL DEFAULT 0`) } catch { /* já existe */ }
 
     const [rows] = await pool.query<RowDataPacket[]>('SELECT id FROM site_settings ORDER BY id ASC LIMIT 1')
 
     if (rows.length === 0) {
       await pool.query(
-        `INSERT INTO site_settings (site_title, site_description, site_logo_url, telegram_group_link) VALUES (?, ?, ?, ?)`,
-        [parsedSiteTitle, parsedSiteDescription, parsedSiteLogoUrl, parsedTelegramGroupLink]
+        `INSERT INTO site_settings (site_title, site_description, site_logo_url, telegram_group_link, allow_user_referral_link, registration_requires_invite) VALUES (?, ?, ?, ?, ?, ?)`,
+        [parsedSiteTitle, parsedSiteDescription, parsedSiteLogoUrl, parsedTelegramGroupLink, parsedAllowUserReferralLink, parsedRegistrationRequiresInvite]
       )
     } else {
       await pool.query(
-        `UPDATE site_settings SET site_title=?, site_description=?, site_logo_url=?, telegram_group_link=?, updated_at=NOW() WHERE id=?`,
-        [parsedSiteTitle, parsedSiteDescription, parsedSiteLogoUrl, parsedTelegramGroupLink, Number(rows[0].id)]
+        `UPDATE site_settings SET site_title=?, site_description=?, site_logo_url=?, telegram_group_link=?, allow_user_referral_link=?, registration_requires_invite=?, updated_at=NOW() WHERE id=?`,
+        [parsedSiteTitle, parsedSiteDescription, parsedSiteLogoUrl, parsedTelegramGroupLink, parsedAllowUserReferralLink, parsedRegistrationRequiresInvite, Number(rows[0].id)]
       )
     }
 
     res.json({
       ok: true,
       message: 'Configurações do site salvas com sucesso.',
-      settings: { siteTitle: parsedSiteTitle, siteDescription: parsedSiteDescription, siteLogoUrl: parsedSiteLogoUrl, telegramGroupLink: parsedTelegramGroupLink },
+      settings: { siteTitle: parsedSiteTitle, siteDescription: parsedSiteDescription, siteLogoUrl: parsedSiteLogoUrl, telegramGroupLink: parsedTelegramGroupLink, allowUserReferralLink: Boolean(parsedAllowUserReferralLink), registrationRequiresInvite: Boolean(parsedRegistrationRequiresInvite) },
     })
   } catch (err) {
     console.error('[admin-site-settings-save]', err)
