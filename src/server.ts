@@ -6149,19 +6149,19 @@ app.post('/api/admin/vip-refunds/:id/reject', requireMaxAdmin, async (req: Authe
 // Deletar VIP específico de um usuário
 app.delete('/api/admin/users/:userId/vip', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
   const userId = Number(req.params.userId)
+  const vipId = Number(req.query.vipId)
+
   if (!userId || Number.isNaN(userId)) {
     res.status(400).json({ ok: false, error: 'ID de usuário inválido.' })
     return
   }
 
-  const { vipId } = req.body as { vipId?: number }
   if (!vipId || Number.isNaN(vipId)) {
     res.status(400).json({ ok: false, error: 'ID do VIP inválido.' })
     return
   }
 
   try {
-    // Verify this VIP belongs to this user
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT uv.id, vl.name AS levelName
        FROM user_vips uv
