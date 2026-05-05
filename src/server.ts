@@ -6160,6 +6160,7 @@ app.delete('/api/admin/users/:userId/vip', requireMaxAdmin, async (req: Authenti
        FROM user_vips uv
        INNER JOIN vip_levels vl ON vl.id = uv.vip_level_id
        WHERE uv.user_id = ? AND uv.status = 'active'
+         AND (uv.expires_at IS NULL OR uv.expires_at > NOW())
        LIMIT 1`,
       [userId]
     )
