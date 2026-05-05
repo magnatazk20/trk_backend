@@ -15898,6 +15898,8 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         created_at,
         COALESCE(balance, 0) AS balance,
         COALESCE(shop_balance, 0) AS shopBalance,
+        COALESCE(recharge_balance, 0) AS rechargeBalance,
+        COALESCE(commission_balance, 0) AS commissionBalance,
         COALESCE(telegram_conectado, 0) AS telegramConectado,
         monthly_salary_contract AS activeContract
       FROM users
@@ -16609,6 +16611,8 @@ app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
         created_at: user.created_at,
         balance: Number(user.balance ?? 0),
         shopBalance: Number(user.shopBalance ?? 0),
+        rechargeBalance: Number(user.rechargeBalance ?? 0),
+        commissionBalance: Number(user.commissionBalance ?? 0),
         telegramConectado: Number(user.telegramConectado ?? 0),
         telegramConnection,
         hasWithdrawPassword,
