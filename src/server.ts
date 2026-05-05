@@ -6157,7 +6157,7 @@ app.delete('/api/admin/users/:userId/vip', requireMaxAdmin, async (req: Authenti
   try {
     // Find active (not expired) VIP for this user
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT uv.id, uv.vip_level_id AS vipLevelId, uv.expires_at, vl.name AS levelName
+      `SELECT uv.id, uv.vip_level_id AS vipLevelId, uv.expires_at, uv.status, vl.name AS levelName
        FROM user_vips uv
        INNER JOIN vip_levels vl ON vl.id = uv.vip_level_id
        WHERE uv.user_id = ? AND uv.status = 'active'
@@ -6166,6 +6166,8 @@ app.delete('/api/admin/users/:userId/vip', requireMaxAdmin, async (req: Authenti
        LIMIT 1`,
       [userId]
     )
+
+    console.log('[admin-user-vip-delete] userId:', userId, 'rows:', rows.length, rows[0] ?? 'none')
 
     if (rows.length === 0) {
       // No active non-expired VIP found - just delete all active ones
