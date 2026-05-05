@@ -15558,8 +15558,8 @@ app.post('/api/admin/users/:id/balance', requireMaxAdmin, async (req: Authentica
     res.json({
       ok: true,
       message: parsedOperation === 'add' ? 'Saldo adicionado com sucesso.' : 'Saldo retirado com sucesso.',
-      balanceBefore: Number(currentBalance.toFixed(2)),
-      balanceAfter: nextBalance,
+      balanceBefore: Number(currentWalletBalance.toFixed(2)),
+      balanceAfter: nextWalletBalance,
       amount: roundedAmount,
       operation: parsedOperation,
     })
