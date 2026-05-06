@@ -9535,7 +9535,7 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
     const [earlyConfigRows] = await conn.query<RowDataPacket[]>(
       `SELECT withdraw_auto_approve AS withdrawAutoApprove FROM system_withdraw_config ORDER BY id ASC LIMIT 1`
     )
-    const shouldAutoApproveEarly = Number(earlyConfigRows[0]?.withdrawAutoApprove ?? 0) === 1
+    const shouldAutoApprove = Number(earlyConfigRows[0]?.withdrawAutoApprove ?? 0) === 1
 
     let activationTokenId = 0
 
@@ -9656,7 +9656,6 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
       `
     )
 
-    const shouldAutoApprove = shouldAutoApproveEarly
     const withdrawFeePercentRaw = Number(configRows[0]?.withdrawFeePercent ?? 0)
     const minWithdrawAmount = Number(configRows[0]?.minWithdrawAmount ?? 0)
     const maxWithdrawAmount = Number(configRows[0]?.maxWithdrawAmount ?? 0)
