@@ -6177,7 +6177,7 @@ app.get('/api/admin/vip-users', requireMaxAdmin, async (req, res) => {
         u.name,
         u.phone,
         vl.name AS vipName,
-        vl.level AS vipLevel,
+        vl.id AS vipLevel,
         vl.price AS vipPrice,
         COALESCE(u.balance, 0) AS balance,
         COALESCE(u.commission_balance, 0) AS commissionBalance,
