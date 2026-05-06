@@ -1872,20 +1872,42 @@ const pollLumopayWithdrawals = async () => {
       const txId = String(row.provider_transaction_id ?? '').trim()
 
       try {
-        const res = await fetch(`${LUMOPAY_TRANSACTION_URL}?external_id=${encodeURIComponent(txId)}`, {
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': LUMO_API_KEY,
-          },
+        // Tenta GET /api/payments/transactions?external_id=X
+        const data: any = {}
+        let res: Response
+        let gotData = false
+
+        res = await fetch(`${LUMOPAY_TRANSACTION_URL}?external_id=${encodeURIComponent(txId)}`, {
+          headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
         })
 
+        try { Object.assign(data, await res.json()) } catch { /* ignore */ }
+
         if (!res.ok) {
-          console.warn(`[lumopay-poll] withdrawal #${withdrawalId} status check failed: ${res.status}`)
+          console.warn(`[lumopay-poll] GET failed for #${withdrawalId}: ${res.status}, trying POST...`)
+          const postRes = await fetch(LUMOPAY_TRANSACTION_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
+            body: JSON.stringify({ transaction_id: txId }),
+          })
+          console.log(`[lumopay-poll] POST response: ${postRes.status}`)
+          if (!postRes.ok) {
+            const postBody = await postRes.text().catch(() => '')
+            console.warn(`[lumopay-poll] POST also failed: ${postRes.status} body: ${postBody.substring(0, 200)}`)
+            continue
+          }
+          try { Object.assign(data, await postRes.json()); gotData = true } catch { /* ignore */ }
+        } else {
+          gotData = true
+        }
+
+        if (!gotData || Object.keys(data).length === 0) {
+          console.warn(`[lumopay-poll] withdrawal #${withdrawalId} tx=${txId} no usable data from lumopay`)
           continue
         }
 
-        const data = await res.json() as { data?: LumopayTransactionStatus[] }
-        const tx = Array.isArray(data?.data) ? data.data[0] : data?.data
+        const txRaw = data?.data
+        const tx = Array.isArray(txRaw) ? txRaw[0] : txRaw
 
         if (!tx) {
           console.warn(`[lumopay-poll] withdrawal #${withdrawalId} tx=${txId} no transaction found in lumopay response`)
