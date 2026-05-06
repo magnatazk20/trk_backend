@@ -51,6 +51,8 @@ const JWT_EXPIRES  = process.env.JWT_EXPIRES_IN ?? '7d'
 const LUMO_API_KEY = 'pk_69aa7a3d1a07dffe750eb533c92fabbe87974479ed791fb7ead328a56e67143d'
 const LUMO_WEBHOOK_SECRET = 'sk_8910b90244b35ab56342bc3c019e569bb59abb9a90a7f69ad1dd59ce59ebd1065dc6240536d0a7b2e69496f8bac1dcdb739d22767183e2421b590f1fbfb77e39'
 const LUMOPAY_TRANSFER_URL = 'https://api.lumopayment.com/api/payments/transfers/pix'
+const LUMOPAY_TRANSACTION_URL = 'https://api.lumopayment.com/api/payments/transactions'
+const LUMOPAY_POLLING_INTERVAL_MS = 30_000
 const SAO_PAULO_TZ = 'America/Sao_Paulo'
 
 let telegramPollingStarted = false
@@ -1835,6 +1837,105 @@ setInterval(async () => {
     console.error('[vip-expire-job]', err)
   }
 }, 60_000)
+
+// ─── Poll Lumopay for pending/processing withdrawals ────────────────────────
+interface LumopayTransactionStatus {
+  id?: string
+  external_id?: string
+  transaction_id?: string
+  status?: string
+  amount?: number
+}
+
+const pollLumopayWithdrawals = async () => {
+  try {
+    // Busca saques com provider_transaction_id preenchido e status = processing/pending
+    const [pendingRows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT id, user_id, amount, provider_transaction_id, status
+      FROM withdrawals
+      WHERE provider_transaction_id IS NOT NULL
+        AND provider_transaction_id != ''
+        AND LOWER(status) IN ('processing', 'pending')
+      ORDER BY id ASC
+      LIMIT 50
+      `
+    )
+
+    if (pendingRows.length === 0) return
+
+    console.log(`[lumopay-poll] checking ${pendingRows.length} withdrawal(s)`)
+
+    for (const row of pendingRows) {
+      const withdrawalId = Number(row.id)
+      const userId = Number(row.user_id)
+      const txId = String(row.provider_transaction_id ?? '').trim()
+
+      try {
+        const res = await fetch(`${LUMOPAY_TRANSACTION_URL}?external_id=${encodeURIComponent(txId)}`, {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': LUMO_API_KEY,
+          },
+        })
+
+        if (!res.ok) {
+          console.warn(`[lumopay-poll] withdrawal #${withdrawalId} status check failed: ${res.status}`)
+          continue
+        }
+
+        const data = await res.json() as { data?: LumopayTransactionStatus[] }
+        const tx = Array.isArray(data?.data) ? data.data[0] : data?.data
+
+        if (!tx) {
+          console.warn(`[lumopay-poll] withdrawal #${withdrawalId} tx=${txId} no transaction found in lumopay response`)
+          continue
+        }
+
+        const providerStatusRaw = String(tx.status ?? '').toLowerCase()
+        const newStatus =
+          providerStatusRaw === 'paid' || providerStatusRaw === 'payment.paid'
+            ? 'paid'
+            : providerStatusRaw === 'failed' || providerStatusRaw === 'canceled' || providerStatusRaw === 'cancelled'
+              ? 'failed'
+              : providerStatusRaw === 'processing'
+                ? 'processing'
+                : null
+
+        if (!newStatus || newStatus === String(row.status ?? '').toLowerCase()) {
+          console.log(`[lumopay-poll] withdrawal #${withdrawalId} tx=${txId} status unchanged: ${row.status}`)
+          continue
+        }
+
+        // Atualiza status do saque
+        await pool.query(
+          `UPDATE withdrawals SET status = ?, paid_at = CASE WHEN ? = 'paid' AND paid_at IS NULL THEN NOW() ELSE paid_at END, updated_at = NOW() WHERE id = ?`,
+          [newStatus, newStatus, withdrawalId]
+        )
+
+        console.log(`[lumopay-poll] withdrawal #${withdrawalId} tx=${txId} updated: ${row.status} -> ${newStatus}`)
+
+        // Se falhou, estorna saldo
+        if (newStatus === 'failed' && userId > 0) {
+          const amount = Number(row.amount ?? 0)
+          await pool.query(
+            `UPDATE users SET balance = COALESCE(balance,0) + ?, commission_balance = COALESCE(commission_balance,0) + ? WHERE id = ?`,
+            [amount, amount, userId]
+          )
+          console.log(`[lumopay-poll] withdrawal #${withdrawalId} FAILED — refunded R$${amount} to user #${userId}`)
+        }
+      } catch (err) {
+        console.error(`[lumopay-poll] withdrawal #${withdrawalId} error:`, err)
+      }
+    }
+  } catch (err) {
+    console.error('[lumopay-poll] job error:', err)
+  }
+}
+
+setInterval(pollLumopayWithdrawals, LUMOPAY_POLLING_INTERVAL_MS)
+pollLumopayWithdrawals() // executa uma vez imediatamente ao iniciar
+console.log(`[lumopay-poll] started — polling every ${LUMOPAY_POLLING_INTERVAL_MS / 1000}s`)
 
 // POST /api/presence/heartbeat — chamado pelo frontend a cada 30s
 app.post('/api/presence/heartbeat', (req, res) => {
