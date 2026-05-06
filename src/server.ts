@@ -1954,9 +1954,11 @@ const pollLumopayWithdrawals = async () => {
   }
 }
 
+// Polling removido — webhook /api/withdraw/webhook cuida da atualizacao de status
+// Mantido apenas como fallback para casos onde o webhook nao e chamado
 setInterval(pollLumopayWithdrawals, LUMOPAY_POLLING_INTERVAL_MS)
 pollLumopayWithdrawals() // executa uma vez imediatamente ao iniciar
-console.log(`[lumopay-poll] started — polling every ${LUMOPAY_POLLING_INTERVAL_MS / 1000}s`)
+console.log(`[lumopay-poll] started — polling every ${LUMOPAY_POLLING_INTERVAL_MS / 1000}s (fallback)`)
 
 // POST /api/presence/heartbeat — chamado pelo frontend a cada 30s
 app.post('/api/presence/heartbeat', (req, res) => {
@@ -9940,6 +9942,7 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
 
       providerTransactionId =
         String(
+          providerPayload?.data?.idTransaction ??
           providerPayload?.data?.external_id ??
           providerPayload?.data?.transaction_id ??
           providerPayload?.transaction_id ??
@@ -10064,20 +10067,31 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
 
 app.post('/api/withdraw/webhook', async (req, res) => {
   const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? 'ip-desconhecido')
+
+  // Formato Lumopay cashout (webhook PHP legado):
+  // { idTransaction, status, type, amount, net_amount, fee, pix_key, pix_type, paid_at, failed_at }
   const payload = (req.body ?? {}) as {
-    status?: string
-    amount?: number | string
-    pixKey?: string
-    idtransaction?: string
     idTransaction?: string
     transactionId?: string
+    idtransaction?: string
+    id?: string
     providerTransactionId?: string
     externalId?: string
-    id?: string
+    external_id?: string
+    status?: string
+    type?: string
+    amount?: number | string
+    net_amount?: number | string
+    fee?: number | string
+    pix_key?: string
+    pixKey?: string
+    pix_type?: string
+    pixType?: string
+    paid_at?: string
+    failed_at?: string
     data?: {
       status?: string
       amount?: number | string
-      pix_key?: string
       transaction_id?: string
       external_id?: string
       id?: string
@@ -10112,11 +10126,12 @@ app.post('/api/withdraw/webhook', async (req, res) => {
 
     const statusOriginal = String(payload?.status ?? payload?.data?.status ?? '').trim()
     if (!statusOriginal) {
-      console.error('[withdraw-webhook] payload inválido sem status', { ip, payload })
+      console.error('[withdraw-webhook] payload sem status', { ip, payload })
       res.status(400).json({ ok: false, error: 'Dados inválidos ou incompletos (status).' })
       return
     }
 
+    // Normaliza status do formato Lumopay
     const statusUpper = statusOriginal.toUpperCase()
     const normalizedStatus =
       statusUpper === 'COMPLETED' || statusUpper === 'PAID' || statusUpper === 'PAYMENT.PAID'
@@ -10129,29 +10144,31 @@ app.post('/api/withdraw/webhook', async (req, res) => {
 
     const amountRaw = Number(String(payload?.amount ?? payload?.data?.amount ?? '').replace(',', '.'))
     const amount = Number.isFinite(amountRaw) ? Number(Math.abs(amountRaw).toFixed(2)) : null
-    const pixKey = String(payload?.pixKey ?? payload?.data?.pix_key ?? '').trim() || null
+    // pixKey pode vir no payload do webhook Lumopay
+    const pixKey = String((payload as any)?.pix_key ?? payload?.pixKey ?? (payload?.data as any)?.pix_key ?? '').trim() || null
 
-    const providerTransactionId = String(
+    // provider_transaction_id: tenta todas as chaves possiveis (Lumopay usa idTransaction)
+    const rawTxId =
+      payload?.idTransaction ??
       payload?.providerTransactionId ??
       payload?.transactionId ??
       payload?.idtransaction ??
-      payload?.idTransaction ??
       payload?.id ??
       payload?.data?.transaction_id ??
       payload?.data?.id ??
       ''
-    ).trim() || null
+    const providerTransactionId = String(rawTxId).trim() || null
 
     const externalId = String(payload?.externalId ?? payload?.data?.external_id ?? '').trim() || null
 
-    console.log('[withdraw-webhook] recebido', {
+    console.log('[withdraw-webhook] receber', {
       ip,
       statusOriginal,
       normalizedStatus,
       amount,
-      pixKey,
       providerTransactionId,
       externalId,
+      rawPayload: payload,
     })
 
     let foundWithdrawal: RowDataPacket | null = null
@@ -14876,6 +14893,7 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
 
       providerTransactionId =
         String(
+          providerResponsePayload?.data?.idTransaction ??
           providerResponsePayload?.data?.external_id ??
           providerResponsePayload?.data?.transaction_id ??
           providerResponsePayload?.transaction_id ??
