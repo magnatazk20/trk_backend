@@ -1874,17 +1874,16 @@ const pollLumopayWithdrawals = async () => {
       try {
         // Tenta GET /api/payments/transactions?external_id=X
         const data: any = {}
-        let res: Response
         let gotData = false
 
-        res = await fetch(`${LUMOPAY_TRANSACTION_URL}?external_id=${encodeURIComponent(txId)}`, {
+        const getRes = await fetch(`${LUMOPAY_TRANSACTION_URL}?external_id=${encodeURIComponent(txId)}`, {
           headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
         })
 
-        try { Object.assign(data, await res.json()) } catch { /* ignore */ }
+        try { Object.assign(data, await getRes.json()) } catch { /* ignore */ }
 
-        if (!res.ok) {
-          console.warn(`[lumopay-poll] GET failed for #${withdrawalId}: ${res.status}, trying POST...`)
+        if (!getRes.ok) {
+          console.warn(`[lumopay-poll] GET failed for #${withdrawalId}: ${getRes.status}, trying POST...`)
           const postRes = await fetch(LUMOPAY_TRANSACTION_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
