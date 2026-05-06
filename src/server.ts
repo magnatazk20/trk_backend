@@ -14612,6 +14612,7 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
     return
   }
 
+  console.log(`[admin-withdrawals-action] START id=${withdrawalId} action=${parsedAction} provider=${parsedProvider}`)
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
@@ -14626,6 +14627,7 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
       `,
       [withdrawalId]
     )
+    console.log(`[admin-withdrawals-action] withdrawRows found=${withdrawRows.length}`, withdrawRows)
 
     if (withdrawRows.length === 0) {
       await conn.rollback()
@@ -14708,6 +14710,7 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
       const lumopayTimeout = setTimeout(() => lumopayAbort.abort(), 30_000)
 
       let providerOk = false
+      console.log(`[admin-withdrawals-action] calling lumopay amount=${netAmount} pixKey=${lumopayPixKey} pixType=${lumopayPixType}`)
       try {
         const fetchRes = await fetch(LUMOPAY_TRANSFER_URL, {
           method: 'POST',
@@ -14718,11 +14721,13 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
           body: JSON.stringify(cashoutPayload),
           signal: lumopayAbort.signal,
         })
+        console.log(`[admin-withdrawals-action] lumopay response ok=${fetchRes.ok} status=${fetchRes.status}`)
         clearTimeout(lumopayTimeout)
         providerOk = fetchRes.ok
         providerResponsePayload = await fetchRes.json().catch(() => ({}))
       } catch (fetchErr: any) {
         clearTimeout(lumopayTimeout)
+        console.error(`[admin-withdrawals-action] fetch error:`, fetchErr)
         await conn.rollback()
         const isTimeout = fetchErr?.name === 'AbortError'
         res.status(502).json({
@@ -14735,6 +14740,7 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
       }
 
       if (!providerOk || providerResponsePayload?.success === false) {
+        console.error(`[admin-withdrawals-action] lumopay failed providerOk=${providerOk} success=${providerResponsePayload?.success}`, providerResponsePayload)
         await conn.rollback()
         res.status(502).json({
           ok: false,
@@ -14743,6 +14749,8 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
         })
         return
       }
+
+      console.log(`[admin-withdrawals-action] lumopay success, providerResponsePayload=`, providerResponsePayload)
 
       providerTransactionId =
         String(
@@ -14892,8 +14900,9 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
     })
   } catch (err) {
     await conn.rollback()
-    console.error('[admin-withdrawals-action]', err)
-    res.status(500).json({ ok: false, error: 'Erro ao atualizar saque.' })
+    const errMsg = err instanceof Error ? err.message : String(err)
+    console.error(`[admin-withdrawals-action] id=${withdrawalId} action=${parsedAction} error:`, errMsg, err)
+    res.status(500).json({ ok: false, error: `Erro ao atualizar saque: ${errMsg}` })
   } finally {
     conn.release()
   }
