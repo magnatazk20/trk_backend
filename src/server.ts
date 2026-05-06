@@ -10295,6 +10295,13 @@ app.post('/api/withdraw/webhook', async (req, res) => {
     try {
       await conn.beginTransaction()
 
+      console.log('[withdraw-webhook] ★ EXECUTANDO UPDATE withdrawals', {
+        withdrawalId,
+        sqlStatus: normalizedStatus,
+        providerTxId: providerTransactionId,
+        extId: externalId,
+      })
+
       await conn.query(
         `
         UPDATE withdrawals
@@ -10321,6 +10328,13 @@ app.post('/api/withdraw/webhook', async (req, res) => {
           withdrawalId,
         ]
       )
+
+      // Verifica se o update realmente aconteceu
+      const [verifyRows] = await conn.query<RowDataPacket[]>(
+        `SELECT id, status, provider_transaction_id, external_id, updated_at FROM withdrawals WHERE id = ?`,
+        [withdrawalId]
+      )
+      console.log('[withdraw-webhook] ★ VERIFICACAO POS-UPDATE:', verifyRows[0])
 
       const shouldRefund =
         normalizedStatus === 'failed' &&
