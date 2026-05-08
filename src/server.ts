@@ -10319,7 +10319,7 @@ app.post('/api/withdraw/webhook', async (req, res) => {
         SET
           status = ?,
           provider_transaction_id = COALESCE(?, provider_transaction_id),
-          external_id = COALESCE(?, external_id),
+          external_id = COALESCE(NULLIF(?, ''), external_id),
           provider_payload = ?,
           paid_at = CASE WHEN ? = 'paid' AND paid_at IS NULL THEN NOW() ELSE paid_at END,
           updated_at = NOW()
@@ -10340,13 +10340,6 @@ app.post('/api/withdraw/webhook', async (req, res) => {
         ]
       )
 
-      // Verifica se o update realmente aconteceu
-      const [verifyRows] = await conn.query<RowDataPacket[]>(
-        `SELECT id, status, provider_transaction_id, external_id, updated_at FROM withdrawals WHERE id = ?`,
-        [withdrawalId]
-      )
-      console.log('[withdraw-webhook] ★ VERIFICACAO POS-UPDATE:', verifyRows[0])
-
       const shouldRefund =
         normalizedStatus === 'failed' &&
         currentStatus !== 'failed' &&
@@ -10354,6 +10347,13 @@ app.post('/api/withdraw/webhook', async (req, res) => {
         currentStatus !== 'canceled' &&
         withdrawalAmount > 0 &&
         userId > 0
+
+      // Log de debug antes do commit
+      const [finalRows] = await conn.query<RowDataPacket[]>(
+        `SELECT id, status, provider_transaction_id, external_id, updated_at FROM withdrawals WHERE id = ?`,
+        [withdrawalId]
+      )
+      console.log('[withdraw-webhook] ★ VERIFICACAO POS-UPDATE:', finalRows[0])
 
       if (shouldRefund) {
         await conn.query(
