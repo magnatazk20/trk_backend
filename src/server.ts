@@ -1885,12 +1885,12 @@ const pollLumopayWithdrawals = async () => {
       const txId = String(row.provider_transaction_id ?? '').trim()
 
       try {
-        // Consulta status da transferência pelo endpoint correto de transfers
+        // Consulta status da transferência via endpoint de transactions com transaction_id
         const data: any = {}
         let gotData = false
 
-        // Tenta GET /api/payments/transfers/pix?transaction_id=X
-        const getRes = await fetch(`${LUMOPAY_TRANSFER_URL}?transaction_id=${encodeURIComponent(txId)}`, {
+        // Tenta GET /api/payments/transactions?transaction_id=X
+        const getRes = await fetch(`${LUMOPAY_TRANSACTION_URL}?transaction_id=${encodeURIComponent(txId)}`, {
           headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
         })
 
@@ -1898,10 +1898,10 @@ const pollLumopayWithdrawals = async () => {
 
         if (!getRes.ok) {
           console.warn(`[lumopay-poll] GET by transaction_id failed for #${withdrawalId}: ${getRes.status}, trying external_id...`)
-          // Fallback: tenta pelo external_id (formato saque_<timestamp>)
+          // Fallback: tenta pelo external_id armazenado no banco
           const externalIdRow = String(row.external_id ?? '').trim()
           if (externalIdRow) {
-            const getRes2 = await fetch(`${LUMOPAY_TRANSFER_URL}?external_id=${encodeURIComponent(externalIdRow)}`, {
+            const getRes2 = await fetch(`${LUMOPAY_TRANSACTION_URL}?external_id=${encodeURIComponent(externalIdRow)}`, {
               headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
             })
             console.log(`[lumopay-poll] GET by external_id response: ${getRes2.status}`)
