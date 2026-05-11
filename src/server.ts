@@ -1885,53 +1885,25 @@ const pollLumopayWithdrawals = async () => {
       const txId = String(row.provider_transaction_id ?? '').trim()
 
       try {
-        // Consulta status da transferência via endpoint de transactions com transaction_id
-        const data: any = {}
-        let gotData = false
-
-        // Tenta GET /api/payments/transactions?transaction_id=X
-        const getRes = await fetch(`${LUMOPAY_TRANSACTION_URL}?transaction_id=${encodeURIComponent(txId)}`, {
+        // GET /api/payments/transactions/:transactionId/status?type=pix_out
+        const statusUrl = `${LUMOPAY_TRANSACTION_URL}/${encodeURIComponent(txId)}/status?type=pix_out`
+        const getRes = await fetch(statusUrl, {
           headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
         })
 
-        try { Object.assign(data, await getRes.json()) } catch { /* ignore */ }
-
         if (!getRes.ok) {
-          console.warn(`[lumopay-poll] GET by transaction_id failed for #${withdrawalId}: ${getRes.status}, trying external_id...`)
-          // Fallback: tenta pelo external_id armazenado no banco
-          const externalIdRow = String(row.external_id ?? '').trim()
-          if (externalIdRow) {
-            const getRes2 = await fetch(`${LUMOPAY_TRANSACTION_URL}?external_id=${encodeURIComponent(externalIdRow)}`, {
-              headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
-            })
-            console.log(`[lumopay-poll] GET by external_id response: ${getRes2.status}`)
-            if (getRes2.ok) {
-              try { Object.assign(data, await getRes2.json()); gotData = true } catch { /* ignore */ }
-            } else {
-              const body2 = await getRes2.text().catch(() => '')
-              console.warn(`[lumopay-poll] GET by external_id also failed: ${getRes2.status} body: ${body2.substring(0, 200)}`)
-              continue
-            }
-          } else {
-            continue
-          }
-        } else {
-          gotData = true
-        }
-
-        if (!gotData || Object.keys(data).length === 0) {
-          console.warn(`[lumopay-poll] withdrawal #${withdrawalId} tx=${txId} no usable data from lumopay`)
+          const body = await getRes.text().catch(() => '')
+          console.warn(`[lumopay-poll] status check failed for #${withdrawalId} tx=${txId}: ${getRes.status} ${body.substring(0, 150)}`)
           continue
         }
 
-        const txRaw = data?.data
-        const tx = Array.isArray(txRaw) ? txRaw[0] : txRaw
-
-        if (!tx) {
-          console.warn(`[lumopay-poll] withdrawal #${withdrawalId} tx=${txId} no transaction found in lumopay response`)
+        const data = await getRes.json().catch(() => null)
+        if (!data?.success || !data?.data) {
+          console.warn(`[lumopay-poll] withdrawal #${withdrawalId} tx=${txId} resposta inválida:`, data)
           continue
         }
 
+        const tx = data.data
         const providerStatusRaw = String(tx.status ?? '').toLowerCase()
         const newStatus =
           providerStatusRaw === 'paid' || providerStatusRaw === 'payment.paid'
@@ -1973,11 +1945,10 @@ const pollLumopayWithdrawals = async () => {
   }
 }
 
-// Poll desativado — endpoint GET da Lumopay não existe (Route not found).
-// O webhook /api/withdraw/webhook (com callbackUrl no cashout) é o único mecanismo de atualização.
-// setInterval(pollLumopayWithdrawals, LUMOPAY_POLLING_INTERVAL_MS)
-// pollLumopayWithdrawals()
-console.log('[lumopay-poll] polling desativado — usando apenas webhook')
+// Poll reativado com endpoint correto: GET /transactions/:id/status?type=pix_out
+setInterval(pollLumopayWithdrawals, LUMOPAY_POLLING_INTERVAL_MS)
+pollLumopayWithdrawals()
+console.log(`[lumopay-poll] started — polling every ${LUMOPAY_POLLING_INTERVAL_MS / 1000}s`)
 
 // POST /api/presence/heartbeat — chamado pelo frontend a cada 30s
 app.post('/api/presence/heartbeat', (req, res) => {
