@@ -1865,7 +1865,7 @@ const pollLumopayWithdrawals = async () => {
     // Busca saques com provider_transaction_id preenchido e status = processing/pending
     const [pendingRows] = await pool.query<RowDataPacket[]>(
       `
-      SELECT id, user_id, amount, provider_transaction_id, status
+      SELECT id, user_id, amount, provider_transaction_id, external_id, status
       FROM withdrawals
       WHERE provider_transaction_id IS NOT NULL
         AND provider_transaction_id != ''
@@ -1885,30 +1885,36 @@ const pollLumopayWithdrawals = async () => {
       const txId = String(row.provider_transaction_id ?? '').trim()
 
       try {
-        // Tenta GET /api/payments/transactions?external_id=X
+        // Consulta status da transferência pelo endpoint correto de transfers
         const data: any = {}
         let gotData = false
 
-        const getRes = await fetch(`${LUMOPAY_TRANSACTION_URL}?external_id=${encodeURIComponent(txId)}`, {
+        // Tenta GET /api/payments/transfers/pix?transaction_id=X
+        const getRes = await fetch(`${LUMOPAY_TRANSFER_URL}?transaction_id=${encodeURIComponent(txId)}`, {
           headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
         })
 
         try { Object.assign(data, await getRes.json()) } catch { /* ignore */ }
 
         if (!getRes.ok) {
-          console.warn(`[lumopay-poll] GET failed for #${withdrawalId}: ${getRes.status}, trying POST...`)
-          const postRes = await fetch(LUMOPAY_TRANSACTION_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
-            body: JSON.stringify({ transaction_id: txId }),
-          })
-          console.log(`[lumopay-poll] POST response: ${postRes.status}`)
-          if (!postRes.ok) {
-            const postBody = await postRes.text().catch(() => '')
-            console.warn(`[lumopay-poll] POST also failed: ${postRes.status} body: ${postBody.substring(0, 200)}`)
+          console.warn(`[lumopay-poll] GET by transaction_id failed for #${withdrawalId}: ${getRes.status}, trying external_id...`)
+          // Fallback: tenta pelo external_id (formato saque_<timestamp>)
+          const externalIdRow = String(row.external_id ?? '').trim()
+          if (externalIdRow) {
+            const getRes2 = await fetch(`${LUMOPAY_TRANSFER_URL}?external_id=${encodeURIComponent(externalIdRow)}`, {
+              headers: { 'Content-Type': 'application/json', 'x-api-key': LUMO_API_KEY },
+            })
+            console.log(`[lumopay-poll] GET by external_id response: ${getRes2.status}`)
+            if (getRes2.ok) {
+              try { Object.assign(data, await getRes2.json()); gotData = true } catch { /* ignore */ }
+            } else {
+              const body2 = await getRes2.text().catch(() => '')
+              console.warn(`[lumopay-poll] GET by external_id also failed: ${getRes2.status} body: ${body2.substring(0, 200)}`)
+              continue
+            }
+          } else {
             continue
           }
-          try { Object.assign(data, await postRes.json()); gotData = true } catch { /* ignore */ }
         } else {
           gotData = true
         }
