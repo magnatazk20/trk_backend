@@ -14657,6 +14657,7 @@ app.get('/api/admin/withdrawals/pending', requireMaxAdmin, async (_req, res) => 
       INNER JOIN users u ON u.id = w.user_id
       LEFT JOIN user_pix_keys pk ON pk.user_id = w.user_id
       WHERE LOWER(w.status) IN ('pending', 'processing')
+         OR (LOWER(w.status) IN ('paid', 'failed', 'cancelled', 'canceled') AND w.updated_at >= NOW() - INTERVAL 2 HOUR)
       ORDER BY w.id DESC
       `
     )
