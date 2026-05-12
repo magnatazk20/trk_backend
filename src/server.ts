@@ -4589,10 +4589,13 @@ app.post('/api/admin/cycles/retroactive-capital-fix', requireMaxAdmin, async (re
 
   const conn = await pool.getConnection()
   try {
-    // Garantir coluna capital_returned na tabela
+    // Garantir coluna capital_returned na tabela (compatível com MySQL 5.x)
     await conn.query(
-      `ALTER TABLE user_cycle_purchases ADD COLUMN IF NOT EXISTS capital_returned TINYINT(1) NOT NULL DEFAULT 0`
-    ).catch(() => null)
+      `ALTER TABLE user_cycle_purchases ADD COLUMN capital_returned TINYINT(1) NOT NULL DEFAULT 0`
+    ).catch((err: { code?: string }) => {
+      if (err?.code !== 'ER_DUP_FIELDNAME') throw err
+      // Coluna já existe — ok
+    })
 
     // Buscar todos os ciclos concluídos onde o capital ainda não foi devolvido
     const [pendingRows] = await conn.query<RowDataPacket[]>(
