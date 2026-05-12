@@ -10394,6 +10394,7 @@ app.post(['/api/withdraw/webhook', '/withdraw/webhook'], async (req, res) => {
         SELECT id, user_id AS userId, amount, status, pix_key AS pixKey
         FROM withdrawals
         WHERE pix_key = ?
+          AND LOWER(status) IN ('pending', 'processing')
         ORDER BY created_at DESC
         LIMIT 1
         `,
@@ -10405,37 +10406,9 @@ app.post(['/api/withdraw/webhook', '/withdraw/webhook'], async (req, res) => {
       }
     }
 
-    if (!foundWithdrawal && amount != null) {
-      const [rowsByAmount] = await pool.query<RowDataPacket[]>(
-        `
-        SELECT id, user_id AS userId, amount, status, pix_key AS pixKey
-        FROM withdrawals
-        WHERE ABS(amount - ?) < 1.0
-        ORDER BY created_at DESC
-        LIMIT 1
-        `,
-        [amount]
-      )
-      if (rowsByAmount.length > 0) {
-        foundWithdrawal = rowsByAmount[0]
-        matchStrategy = 'amount_approx'
-      }
-    }
-
-    if (!foundWithdrawal) {
-      const [rowsMostRecent] = await pool.query<RowDataPacket[]>(
-        `
-        SELECT id, user_id AS userId, amount, status, pix_key AS pixKey
-        FROM withdrawals
-        ORDER BY created_at DESC
-        LIMIT 1
-        `
-      )
-      if (rowsMostRecent.length > 0) {
-        foundWithdrawal = rowsMostRecent[0]
-        matchStrategy = 'most_recent'
-      }
-    }
+    // REMOVIDOS: fallbacks amount_approx e most_recent — eram extremamente perigosos
+    // e causavam pagamentos para usuários errados ao associar webhooks da Lumopay
+    // ao saque errado quando o matching principal falhava.
 
     if (!foundWithdrawal) {
       console.error('[withdraw-webhook] saque não encontrado', {
@@ -10454,6 +10427,24 @@ app.post(['/api/withdraw/webhook', '/withdraw/webhook'], async (req, res) => {
     const userId = Number(foundWithdrawal.userId)
     const currentStatus = String(foundWithdrawal.status ?? '').toLowerCase()
     const withdrawalAmount = Number(foundWithdrawal.amount ?? 0)
+
+    // Guard: não re-processar saques já em estado final
+    if (currentStatus === 'paid' || currentStatus === 'payment.paid') {
+      console.warn('[withdraw-webhook] saque já está PAGO, ignorando webhook duplicado', {
+        withdrawalId, userId, currentStatus, matchStrategy,
+        providerTransactionId, externalId,
+      })
+      res.json({ ok: true, message: 'Webhook ignorado — saque já está pago.', withdrawal: { id: withdrawalId, status: currentStatus } })
+      return
+    }
+
+    if ((currentStatus === 'failed' || currentStatus === 'cancelled' || currentStatus === 'canceled') && normalizedStatus !== 'paid') {
+      console.warn('[withdraw-webhook] saque já em estado final, ignorando webhook', {
+        withdrawalId, userId, currentStatus, normalizedStatus, matchStrategy,
+      })
+      res.json({ ok: true, message: 'Webhook ignorado — saque já está em estado final.', withdrawal: { id: withdrawalId, status: currentStatus } })
+      return
+    }
 
     console.log('[withdraw-webhook] ★ SAQUE ENCONTRADO', {
       matchStrategy,
