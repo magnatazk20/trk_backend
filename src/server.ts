@@ -10042,10 +10042,16 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
 
     // ── Desconta da carteira correta ──
     if (isCommissionWallet) {
-      // Desconta apenas da commission_balance
+      // Saque de comissão: desconta de balance e commission_balance
       await conn.query(
-        `UPDATE users SET commission_balance = GREATEST(COALESCE(commission_balance, 0) - ?, 0) WHERE id = ?`,
-        [safeAmount, parsedUserId]
+        `
+        UPDATE users
+        SET
+          balance = GREATEST(COALESCE(balance, 0) - ?, 0),
+          commission_balance = GREATEST(COALESCE(commission_balance, 0) - ?, 0)
+        WHERE id = ?
+        `,
+        [safeAmount, safeAmount, parsedUserId]
       )
     } else {
       // Saque do saldo normal: desconta apenas de balance e recharge_balance.
