@@ -1455,6 +1455,22 @@ const requireMaxAdmin = async (req: AuthenticatedRequest, res: Response, next: N
   next()
 }
 
+const requireAdminLevelTwo = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  const authUser = await resolveAuthUser(req)
+  if (!authUser) {
+    res.status(401).json({ ok: false, error: 'Não autorizado.' })
+    return
+  }
+
+  if (!authUser.isAdmin) {
+    res.status(403).json({ ok: false, error: 'Acesso restrito para administradores.' })
+    return
+  }
+
+  req.authUser = authUser
+  next()
+}
+
 // ─── Security Logs ────────────────────────────────────────────────────────────
 const ensureSecurityLogsTable = async () => {
   await pool.query(`
@@ -11195,11 +11211,10 @@ const applyReferralCommissionsForTask = async (
               `
               UPDATE users
               SET
-                balance = COALESCE(balance, 0) + ?,
                 commission_balance = COALESCE(commission_balance, 0) + ?
               WHERE id = ?
               `,
-              [commissionAmount, commissionAmount, parentUserId]
+              [commissionAmount, parentUserId]
             )
 
             await conn.query(
@@ -11468,11 +11483,10 @@ const applyReferralCommissionsForDeposit = async (cashinPaymentId: number, depos
               `
               UPDATE users
               SET
-                balance = COALESCE(balance, 0) + ?,
                 commission_balance = COALESCE(commission_balance, 0) + ?
               WHERE id = ?
               `,
-              [commissionAmount, commissionAmount, parentUserId]
+              [commissionAmount, parentUserId]
             )
 
             await conn.query(
@@ -11524,6 +11538,7 @@ const applyReferralCommissionsForDeposit = async (cashinPaymentId: number, depos
                   level,
                   commissionPercent: Number(levelConfig.commissionPercent.toFixed(2)),
                   baseAmount: Number(parsedDepositAmount.toFixed(2)),
+                  creditedTo: 'commission_balance',
                 }),
               ]
             )
@@ -11627,16 +11642,15 @@ const applyReferralCommissionsForVipPurchase = async (
       if (levelConfig) {
         const commissionAmount = Number((vipLevelPrice * (levelConfig.commissionPercent / 100)).toFixed(2))
         if (commissionAmount > 0) {
-          // Credita comissão no balance total E no commission_balance do upline
+          // Credita comissão apenas no commission_balance do upline
           await conn.query(
             `
             UPDATE users
             SET
-              balance = COALESCE(balance, 0) + ?,
               commission_balance = COALESCE(commission_balance, 0) + ?
             WHERE id = ?
             `,
-            [commissionAmount, commissionAmount, parentUserId]
+            [commissionAmount, parentUserId]
           )
 
           beneficiaryIds.push(parentUserId)
@@ -15824,7 +15838,7 @@ app.patch('/api/admin/users/:id/ban', requireMaxAdmin, async (req, res) => {
   }
 })
 
-app.patch('/api/admin/users/:id/referral-link', requireMaxAdmin, async (req, res) => {
+app.patch('/api/admin/users/:id/referral-link', requireAdminLevelTwo, async (req, res) => {
   const userId = Number(req.params.id)
   const rawAllow = (req.body as { allow_referral_link?: number | string | boolean })?.allow_referral_link
   const allow =
@@ -16675,7 +16689,7 @@ app.get('/api/admin/users/:id/withdraw-activation-token-info', requireMaxAdmin, 
   }
 })
 
-app.get('/api/admin/users/:id/details', requireMaxAdmin, async (req, res) => {
+app.get('/api/admin/users/:id/details', requireAdminLevelTwo, async (req, res) => {
   const userId = Number(req.params.id)
 
   if (!userId || Number.isNaN(userId)) {
