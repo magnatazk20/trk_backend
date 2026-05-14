@@ -9757,6 +9757,13 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
       `
     )
 
+    // Migração: garante que a coluna wallet_type existe
+    try {
+      await conn.query(
+        `ALTER TABLE withdrawals ADD COLUMN wallet_type VARCHAR(20) NOT NULL DEFAULT 'balance'`
+      )
+    } catch { /* coluna já existe */ }
+
     const [users] = await conn.query<RowDataPacket[]>(
       `
       SELECT id, balance, recharge_balance AS rechargeBalance, commission_balance AS commissionBalance, withdraw_password AS withdrawPassword
@@ -10140,9 +10147,10 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
         status,
         external_id,
         provider_payload,
-        paid_at
+        paid_at,
+        wallet_type
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         parsedUserId,
@@ -10156,6 +10164,7 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
         dbExternalId,
         providerPayload ? JSON.stringify(providerPayload) : null,
         withdrawStatus === 'paid' ? new Date() : null,
+        isCommissionWallet ? 'commission' : 'balance',
       ]
     ) as any
 
@@ -14951,7 +14960,7 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
 
     const [withdrawRows] = await conn.query<RowDataPacket[]>(
       `
-      SELECT id, user_id AS userId, amount, status
+      SELECT id, user_id AS userId, amount, status, COALESCE(wallet_type, 'balance') AS walletType
       FROM withdrawals
       WHERE id = ?
       LIMIT 1
@@ -15164,16 +15173,20 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
 
     let refunded = false
     if (parsedAction === 'cancel' && shouldRefund && amount > 0 && userId > 0) {
-      await conn.query(
-        `
-        UPDATE users
-        SET
-          balance = COALESCE(balance, 0) + ?,
-          commission_balance = COALESCE(commission_balance, 0) + ?
-        WHERE id = ?
-        `,
-        [amount, amount, userId]
-      )
+      const walletType = String(withdrawal.walletType ?? 'balance').toLowerCase()
+      const isCommissionRefund = walletType === 'commission'
+
+      if (isCommissionRefund) {
+        await conn.query(
+          `UPDATE users SET commission_balance = COALESCE(commission_balance, 0) + ? WHERE id = ?`,
+          [amount, userId]
+        )
+      } else {
+        await conn.query(
+          `UPDATE users SET balance = COALESCE(balance, 0) + ? WHERE id = ?`,
+          [amount, userId]
+        )
+      }
       refunded = true
     }
 
