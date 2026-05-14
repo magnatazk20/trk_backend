@@ -15826,7 +15826,14 @@ app.patch('/api/admin/users/:id/ban', requireMaxAdmin, async (req, res) => {
 
 app.patch('/api/admin/users/:id/referral-link', requireMaxAdmin, async (req, res) => {
   const userId = Number(req.params.id)
-  const allow = (req.body as { allow_referral_link?: number })?.allow_referral_link ? 1 : 0
+  const rawAllow = (req.body as { allow_referral_link?: number | string | boolean })?.allow_referral_link
+  const allow =
+    rawAllow === true ||
+    rawAllow === 1 ||
+    rawAllow === '1' ||
+    String(rawAllow ?? '').trim().toLowerCase() === 'true'
+      ? 1
+      : 0
 
   if (!userId || Number.isNaN(userId)) {
     res.status(400).json({ ok: false, error: 'ID inválido.' })
@@ -15841,7 +15848,19 @@ app.patch('/api/admin/users/:id/referral-link', requireMaxAdmin, async (req, res
       res.status(404).json({ ok: false, error: 'Usuário não encontrado.' })
       return
     }
-    res.json({ ok: true, message: allow ? 'Link de convite ativado.' : 'Link de convite desativado.' })
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      'SELECT COALESCE(allow_referral_link, 1) AS allow_referral_link FROM users WHERE id = ? LIMIT 1',
+      [userId]
+    )
+    const persistedRaw = rows[0]?.allow_referral_link
+    const persistedAllow = Number(persistedRaw) === 1 ? 1 : 0
+
+    res.json({
+      ok: true,
+      message: persistedAllow ? 'Link de convite ativado.' : 'Link de convite desativado.',
+      allow_referral_link: persistedAllow,
+    })
   } catch (err) {
     console.error('[admin-users-referral-link]', err)
     res.status(500).json({ ok: false, error: 'Falha ao alterar permissão.' })
