@@ -9759,7 +9759,7 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
 
     const [users] = await conn.query<RowDataPacket[]>(
       `
-      SELECT id, balance, commission_balance AS commissionBalance, withdraw_password AS withdrawPassword
+      SELECT id, balance, recharge_balance AS rechargeBalance, commission_balance AS commissionBalance, withdraw_password AS withdrawPassword
       FROM users
       WHERE id = ?
       LIMIT 1
@@ -9881,10 +9881,10 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
     const holderCpf = String(pixRows[0].holderCpf ?? '').replace(/\D/g, '')
     const pixKeyType = normalizePixType(String(pixRows[0].pixKeyType ?? 'CHAVE_ALEATORIA'))
     const pixKey = normalizePixKey(String(pixRows[0].pixKey ?? ''), pixKeyType)
-    // Usa o saldo da carteira correta: commission ou balance padrão
+    // Usa o saldo da carteira correta: commission ou recharge (saldo normal)
     const currentBalance = isCommissionWallet
       ? Number(users[0].commissionBalance ?? 0)
-      : Number(users[0].balance ?? 0)
+      : Number(users[0].rechargeBalance ?? 0)
 
     if (!holderName || holderCpf.length !== 11 || !pixKey) {
       await conn.rollback()
@@ -10048,22 +10048,17 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
         [safeAmount, parsedUserId]
       )
     } else {
-      // Desconta da balance. recharge_balance precisa vir ANTES de commission_balance no SET
-      // para usar o valor ORIGINAL de commission_balance no cálculo do restante
-      // (MySQL avalia SET da esquerda para direita; inverter a ordem causaria dupla dedução)
+      // Saque do saldo normal: desconta apenas de balance e recharge_balance.
+      // commission_balance NÃO é tocada — pertenece à carteira de comissão separada.
       await conn.query(
         `
         UPDATE users
         SET
-          balance = ?,
-          recharge_balance = GREATEST(
-            COALESCE(recharge_balance, 0) - GREATEST(? - COALESCE(commission_balance, 0), 0),
-            0
-          ),
-          commission_balance = GREATEST(COALESCE(commission_balance, 0) - ?, 0)
+          balance = GREATEST(COALESCE(balance, 0) - ?, 0),
+          recharge_balance = GREATEST(COALESCE(recharge_balance, 0) - ?, 0)
         WHERE id = ?
         `,
-        [newBalance, safeAmount, safeAmount, parsedUserId]
+        [safeAmount, safeAmount, parsedUserId]
       )
     }
 
