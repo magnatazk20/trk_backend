@@ -6537,6 +6537,108 @@ app.get('/api/admin/vip-users', requireMaxAdmin, async (req, res) => {
     res.status(500).json({ ok: false, error: 'Erro ao carregar lista de usuários VIP.', details: message })
   }
 })
+
+// Lista de usuários VIP T1+ que convidaram alguém desde que se tornaram VIP T1+
+app.get('/api/admin/vip-referrals', requireMaxAdmin, async (req, res) => {
+  try {
+    const search = String(req.query.search ?? '').trim()
+    const page = Math.max(1, Number(req.query.page ?? 1))
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit ?? 50)))
+    const offset = (page - 1) * limit
+
+    const searchWhere = search ? 'AND (u.name LIKE ? OR u.phone LIKE ?)' : ''
+    const searchParams = search ? [`%${search}%`, `%${search}%`] : []
+
+    const [countRows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT COUNT(DISTINCT u.id) AS total
+      FROM user_vips uv
+      INNER JOIN vip_levels vl ON vl.id = uv.vip_level_id
+      INNER JOIN users u ON u.id = uv.user_id
+      INNER JOIN (
+        SELECT user_id, MIN(started_at) AS firstT1At
+        FROM user_vips
+        WHERE vip_level_id != 6
+        GROUP BY user_id
+      ) AS earliest ON earliest.user_id = u.id
+      WHERE uv.status = 'active'
+        AND (uv.expires_at IS NULL OR uv.expires_at > NOW())
+        AND vl.id != 6
+        AND vl.price > 0
+        ${searchWhere}
+        AND EXISTS (
+          SELECT 1 FROM users r
+          WHERE r.referred_by_user_id = u.id
+            AND r.created_at >= earliest.firstT1At
+        )
+      `,
+      searchParams
+    )
+    const total = Number(countRows[0]?.total ?? 0)
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        u.id AS userId,
+        u.name,
+        u.phone,
+        vl.name AS vipName,
+        vl.id AS vipLevelId,
+        vl.price AS vipPrice,
+        uv.started_at AS vipStartedAt,
+        uv.expires_at AS vipExpiresAt,
+        earliest.firstT1At,
+        (
+          SELECT COUNT(*) FROM users r
+          WHERE r.referred_by_user_id = u.id
+            AND r.created_at >= earliest.firstT1At
+        ) AS invitedSinceVip
+      FROM user_vips uv
+      INNER JOIN vip_levels vl ON vl.id = uv.vip_level_id
+      INNER JOIN users u ON u.id = uv.user_id
+      INNER JOIN (
+        SELECT user_id, MIN(started_at) AS firstT1At
+        FROM user_vips
+        WHERE vip_level_id != 6
+        GROUP BY user_id
+      ) AS earliest ON earliest.user_id = u.id
+      WHERE uv.status = 'active'
+        AND (uv.expires_at IS NULL OR uv.expires_at > NOW())
+        AND vl.id != 6
+        AND vl.price > 0
+        ${searchWhere}
+        AND (
+          SELECT COUNT(*) FROM users r
+          WHERE r.referred_by_user_id = u.id
+            AND r.created_at >= earliest.firstT1At
+        ) > 0
+      ORDER BY invitedSinceVip DESC
+      LIMIT ? OFFSET ?
+      `,
+      [...searchParams, limit, offset]
+    )
+
+    const users = rows.map((row) => ({
+      userId: Number(row.userId),
+      name: String(row.name ?? ''),
+      phone: String(row.phone ?? ''),
+      vipName: String(row.vipName ?? ''),
+      vipLevelId: Number(row.vipLevelId ?? 0),
+      vipPrice: Number(row.vipPrice ?? 0),
+      vipStartedAt: row.vipStartedAt ? String(row.vipStartedAt) : null,
+      vipExpiresAt: row.vipExpiresAt ? String(row.vipExpiresAt) : null,
+      firstT1At: row.firstT1At ? String(row.firstT1At) : null,
+      invitedSinceVip: Number(row.invitedSinceVip ?? 0),
+    }))
+
+    res.json({ ok: true, total, page, limit, users })
+  } catch (err) {
+    console.error('[admin-vip-referrals]', err)
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ ok: false, error: 'Erro ao carregar lista de indicações VIP.', details: message })
+  }
+})
+
 app.delete('/api/admin/users/:userId/vip', requireMaxAdmin, async (req: AuthenticatedRequest, res) => {
   const userId = Number(req.params.userId)
   const vipId = Number(req.query.vipId)
