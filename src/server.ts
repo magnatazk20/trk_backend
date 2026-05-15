@@ -10225,6 +10225,8 @@ app.post('/api/withdraw/request', requireAuth, async (req: AuthenticatedRequest,
 
     // Emite saldo atualizado via WebSocket
     emitBalanceUpdate(parsedUserId)
+    // Emite atualização de saques pendentes para admins
+    emitPendingWithdrawalsUpdate()
 
     res.json({
       ok: true,
@@ -10542,6 +10544,8 @@ app.post(['/api/withdraw/webhook', '/withdraw/webhook'], async (req, res) => {
       }
 
       await conn.commit()
+      // Emite atualização de saques pendentes para admins via WebSocket
+      emitPendingWithdrawalsUpdate()
 
       console.log('[withdraw-webhook] ★ SUCESSO — saque atualizado', {
         withdrawalId,
@@ -15259,6 +15263,8 @@ app.post('/api/admin/withdrawals/:id/action', requireMaxAdmin, async (req: Authe
     )
 
     await conn.commit()
+    // Emite atualização de saques pendentes para admins via WebSocket
+    emitPendingWithdrawalsUpdate()
 
     res.json({
       ok: true,
@@ -18694,6 +18700,74 @@ const emitBalanceUpdate = async (userId: number) => {
   }
 }
 
+async function emitPendingWithdrawalsUpdate() {
+  try {
+    const [configRows] = await pool.query<RowDataPacket[]>(
+      `SELECT withdraw_fee_percent AS withdrawFeePercent FROM system_withdraw_config ORDER BY id ASC LIMIT 1`
+    )
+    const configuredFeePercent = Number(configRows[0]?.withdrawFeePercent ?? 0)
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT
+        w.id,
+        w.amount,
+        w.status,
+        w.created_at AS createdAt,
+        w.updated_at AS updatedAt,
+        w.paid_at AS paidAt,
+        COALESCE(w.holder_cpf,    pk.holder_cpf,    '')  AS holderCpf,
+        COALESCE(w.pix_key_type,  pk.pix_key_type,  '')  AS pixKeyType,
+        COALESCE(w.pix_key,       pk.pix_key,       '')  AS pixKey,
+        COALESCE(w.holder_name,   pk.holder_name,   '')  AS holderName,
+        u.id   AS userId,
+        u.name AS userName,
+        u.phone AS userPhone
+      FROM withdrawals w
+      INNER JOIN users u ON u.id = w.user_id
+      LEFT JOIN user_pix_keys pk ON pk.user_id = w.user_id
+      WHERE LOWER(w.status) IN ('pending', 'processing')
+      ORDER BY w.id DESC
+      `
+    )
+
+    const withdrawals = rows.map((row) => {
+      const amount = Number(row.amount ?? 0)
+      const feeAmount = Number(((amount * configuredFeePercent) / 100).toFixed(2))
+      const netAmount = Number((amount - feeAmount).toFixed(2))
+      return {
+        id: Number(row.id),
+        amount,
+        status: String(row.status ?? 'pending').toLowerCase(),
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        paidAt: row.paidAt,
+        feePercent: configuredFeePercent,
+        feeAmount,
+        netAmount,
+        holderCpf: String(row.holderCpf ?? ''),
+        pixKeyType: String(row.pixKeyType ?? ''),
+        pixKey: String(row.pixKey ?? ''),
+        holderName: String(row.holderName ?? ''),
+        user: {
+          id: Number(row.userId),
+          name: String(row.userName ?? 'Usuário'),
+          phone: String(row.userPhone ?? ''),
+        },
+      }
+    })
+
+    io.to('admin:withdrawals').emit('withdrawals:pending:update', {
+      ok: true,
+      total: withdrawals.length,
+      withdrawFeePercent: configuredFeePercent,
+      withdrawals,
+    })
+  } catch (err) {
+    console.error('[ws-pending-withdrawals-update]', err)
+  }
+}
+
 io.on('connection', (socket) => {
   console.log(`[ws] client connected: ${socket.id}`)
 
@@ -18722,6 +18796,25 @@ io.on('connection', (socket) => {
     socket.join(`user:${userId}`)
     // Envia saldos atuais imediatamente
     emitBalanceUpdate(userId)
+  })
+
+  socket.on('withdrawals:admin:subscribe', async (payload: { token?: string }) => {
+    const token = String(payload?.token ?? '').trim()
+    if (!token) return
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload
+      const userId = Number(decoded?.id)
+      if (!userId || Number.isNaN(userId)) return
+      const [rows] = await pool.query<RowDataPacket[]>(
+        'SELECT id, is_admin AS isAdmin FROM users WHERE id = ? LIMIT 1',
+        [userId]
+      )
+      if (rows.length === 0 || Number(rows[0].isAdmin ?? 0) < 1) return
+      socket.join('admin:withdrawals')
+      await emitPendingWithdrawalsUpdate()
+    } catch {
+      // token inválido ou erro de DB
+    }
   })
 
   socket.on('disconnect', () => {
