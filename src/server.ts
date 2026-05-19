@@ -4017,7 +4017,7 @@ app.post('/api/admin/monthly-salary-plans', requireMaxAdmin, async (req, res) =>
         is_active,
         sort_order
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         parsedTitle,
